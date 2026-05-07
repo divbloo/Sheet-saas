@@ -25,9 +25,10 @@ const SheetSchema = new mongoose.Schema(
     name: {
       type: String,
       required: true,
+      trim: true,
     },
 
-    owner: {
+    createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
@@ -41,9 +42,19 @@ const SheetSchema = new mongoose.Schema(
       index: true,
     },
 
-    erpType: {
-      type: String,
-      default: "custom",
+    erpTemplate: {
+      enabled: {
+        type: Boolean,
+        default: false,
+      },
+      type: {
+        type: String,
+        default: "custom",
+      },
+      moduleName: {
+        type: String,
+        default: "",
+      },
     },
 
     data: {
@@ -62,7 +73,7 @@ const SheetSchema = new mongoose.Schema(
 
         role: {
           type: String,
-          enum: ["viewer", "editor"],
+          enum: ["owner", "editor", "viewer"],
           default: "viewer",
         },
       },
@@ -94,10 +105,41 @@ const SheetSchema = new mongoose.Schema(
       type: Object,
       default: {},
     },
+
+    analytics: {
+      totalEdits: {
+        type: Number,
+        default: 0,
+      },
+      totalFormulaCells: {
+        type: Number,
+        default: 0,
+      },
+      totalMergedCells: {
+        type: Number,
+        default: 0,
+      },
+      lastEditedBy: {
+        type: String,
+        default: "",
+      },
+      lastEditedAt: {
+        type: Date,
+        default: null,
+      },
+      activeUsers: {
+        type: Number,
+        default: 0,
+      },
+    },
   },
   {
     timestamps: true,
   }
 );
+
+SheetSchema.index({ "collaborators.userId": 1, updatedAt: -1 });
+SheetSchema.index({ workspaceId: 1, updatedAt: -1 });
+SheetSchema.index({ createdBy: 1, updatedAt: -1 });
 
 module.exports = mongoose.model("Sheet", SheetSchema);

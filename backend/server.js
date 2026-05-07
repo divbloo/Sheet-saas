@@ -1,7 +1,9 @@
 require("dotenv").config();
 
 const express = require("express");
+const fs = require("fs");
 const http = require("http");
+const path = require("path");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -14,22 +16,31 @@ const User = require("./models/User");
 const Sheet = require("./models/Sheet");
 const Workspace = require("./models/Workspace");
 const ChangeLog = require("./models/ChangeLog");
+const {
+  authLimiter,
+  createCorsOptions,
+  createHelmetOptions,
+  getFrontendUrls,
+  verifyProductionSecurity,
+} = require("./config/security");
+const { isValidCellIndex, isValidObjectId } = require("./utils/validation");
 
 const app = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 5000;
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URLS = getFrontendUrls();
+const corsOptions = createCorsOptions(FRONTEND_URLS);
 
 const io = new Server(server, {
   cors: {
-    origin: FRONTEND_URL,
+    origin: FRONTEND_URLS,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   },
 });
 
-app.use(helmet());
-app.use(cors({ origin: FRONTEND_URL }));
+app.use(helmet(createHelmetOptions()));
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "15mb" }));
 
 app.use(
@@ -38,6 +49,26 @@ app.use(
     max: 500,
   })
 );
+
+const rejectInvalidId = (res, name) => {
+  return res.status(400).json({ message: `Invalid ${name}` });
+};
+
+app.param("id", (req, res, next, id) => {
+  if (!isValidObjectId(id)) {
+    return rejectInvalidId(res, "id");
+  }
+
+  next();
+});
+
+app.param("userId", (req, res, next, userId) => {
+  if (!isValidObjectId(userId)) {
+    return rejectInvalidId(res, "user id");
+  }
+
+  next();
+});
 
 if (!process.env.MONGO_URI) {
   console.error("Missing MONGO_URI in .env file");
@@ -48,6 +79,8 @@ if (!process.env.JWT_SECRET) {
   console.error("Missing JWT_SECRET in .env file");
   process.exit(1);
 }
+
+verifyProductionSecurity();
 
 mongoose
   .connect(process.env.MONGO_URI)
@@ -75,6 +108,45 @@ const createEmptySheetData = (rows = 60, cols = 20) => {
   return Array.from({ length: rows }, () =>
     Array.from({ length: cols }, () => createCell(""))
   );
+};
+
+const ensureCell = (sheet, rowIndex, colIndex) => {
+  while (sheet.data.length <= rowIndex) {
+    sheet.data.push([]);
+  }
+
+  while (sheet.data[rowIndex].length <= colIndex) {
+    sheet.data[rowIndex].push(createCell(""));
+  }
+
+  const cell = sheet.data[rowIndex][colIndex];
+
+  if (!cell || typeof cell !== "object") {
+    sheet.data[rowIndex][colIndex] = createCell(cell || "");
+  }
+
+  return sheet.data[rowIndex][colIndex];
+};
+
+const applyCellPatch = (sheet, patch) => {
+  const rowIndex = Number(patch.rowIndex);
+  const colIndex = Number(patch.colIndex);
+
+  if (!isValidCellIndex(rowIndex) || !isValidCellIndex(colIndex)) {
+    return null;
+  }
+
+  const cell = ensureCell(sheet, rowIndex, colIndex);
+
+  cell.value = patch.value ?? "";
+  cell.formula = patch.formula || "";
+  cell.style = {
+    ...defaultCellStyle,
+    ...(cell.style || {}),
+    ...(patch.style || {}),
+  };
+
+  return { rowIndex, colIndex, cell };
 };
 
 const createDefaultMeta = () => ({
@@ -351,7 +423,7 @@ app.get("/", (req, res) => {
 
 /* AUTH */
 
-app.post("/signup", async (req, res) => {
+app.post("/signup", authLimiter, async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
@@ -392,7 +464,7 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", authLimiter, async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
@@ -528,6 +600,10 @@ app.post("/sheet", auth, async (req, res) => {
     const workspaceId = req.body.workspaceId || null;
 
     if (workspaceId) {
+      if (!isValidObjectId(workspaceId)) {
+        return rejectInvalidId(res, "workspace id");
+      }
+
       const workspace = await Workspace.findById(workspaceId);
 
       if (!workspace) {
@@ -586,6 +662,10 @@ app.get("/sheets", auth, async (req, res) => {
     };
 
     if (req.query.workspaceId) {
+      if (!isValidObjectId(req.query.workspaceId)) {
+        return rejectInvalidId(res, "workspace id");
+      }
+
       filter.workspaceId = req.query.workspaceId;
     }
 
@@ -893,6 +973,10 @@ const getOnlineUsers = (sheetId) => {
 };
 
 const broadcastPresence = async (sheetId) => {
+  if (!isValidObjectId(sheetId)) {
+    return;
+  }
+
   const users = getOnlineUsers(sheetId);
 
   await Sheet.findByIdAndUpdate(sheetId, {
@@ -920,6 +1004,11 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   socket.on("join-sheet", async (sheetId) => {
     try {
+      if (!isValidObjectId(sheetId)) {
+        socket.emit("socket-error", "Invalid sheet id");
+        return;
+      }
+
       const { sheet, role } = await findSheetForUser(sheetId, socket.user.id);
 
       if (!sheet || !canRead(role)) {
@@ -948,6 +1037,11 @@ io.on("connection", (socket) => {
   });
 
   socket.on("leave-sheet", async (sheetId) => {
+    if (!isValidObjectId(sheetId)) {
+      socket.emit("socket-error", "Invalid sheet id");
+      return;
+    }
+
     socket.leave(sheetId);
 
     if (onlineUsersBySheet.has(sheetId)) {
@@ -956,14 +1050,33 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("cell-change", async ({ sheetId, rowIndex, colIndex, value }) => {
+  socket.on("cell-change", async ({ sheetId, rowIndex, colIndex, value, formula, patches }, ack) => {
     try {
+      if (!isValidObjectId(sheetId)) {
+        socket.emit("socket-error", "Invalid sheet id");
+        if (typeof ack === "function") ack({ ok: false, message: "Invalid sheet id" });
+        return;
+      }
+
       const { sheet, role } = await findSheetForUser(sheetId, socket.user.id);
 
       if (!sheet || !canEdit(role)) {
         socket.emit("socket-error", "You do not have edit permission");
+        if (typeof ack === "function") ack({ ok: false, message: "You do not have edit permission" });
         return;
       }
+
+      if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+        socket.emit("socket-error", "Invalid cell position");
+        if (typeof ack === "function") ack({ ok: false, message: "Invalid cell position" });
+        return;
+      }
+
+      const normalizedPatches = Array.isArray(patches) && patches.length > 0
+        ? patches.slice(0, 50)
+        : [{ rowIndex, colIndex, value, formula }];
+      const numericRowIndex = Number(rowIndex);
+      const numericColIndex = Number(colIndex);
 
       const oldCell = sheet.data?.[rowIndex]?.[colIndex] || "";
       const oldValue =
@@ -972,16 +1085,21 @@ io.on("connection", (socket) => {
       await createChangeLog({
         sheet,
         user: socket.user,
-        rowIndex,
-        colIndex,
+        rowIndex: numericRowIndex,
+        colIndex: numericColIndex,
         oldValue,
-        newValue: value,
-        changeType: String(value).startsWith("=") ? "formula" : "value",
+        newValue: formula || value,
+        changeType: formula || String(value).startsWith("=") ? "formula" : "value",
       });
+
+      normalizedPatches.forEach((patch) => applyCellPatch(sheet, patch));
+      sheet.markModified("data");
 
       sheet.analytics = {
         ...(sheet.analytics || {}),
         totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+        totalFormulaCells: countFormulaCells(sheet.data),
+        totalMergedCells: sheet.meta?.merges?.length || 0,
         lastEditedBy: socket.user.email,
         lastEditedAt: new Date(),
       };
@@ -992,28 +1110,55 @@ io.on("connection", (socket) => {
         rowIndex,
         colIndex,
         value,
+        formula,
+        patches: normalizedPatches,
         updatedBy: socket.user.email,
       });
+
+      if (typeof ack === "function") ack({ ok: true });
     } catch (error) {
       socket.emit("socket-error", "Failed to update cell");
+      if (typeof ack === "function") ack({ ok: false, message: "Failed to update cell" });
     }
   });
 
-  socket.on("cell-style-change", async ({ sheetId, rowIndex, colIndex, style }) => {
+  socket.on("cell-style-change", async ({ sheetId, rowIndex, colIndex, style }, ack) => {
     try {
+      if (!isValidObjectId(sheetId)) {
+        socket.emit("socket-error", "Invalid sheet id");
+        if (typeof ack === "function") ack({ ok: false, message: "Invalid sheet id" });
+        return;
+      }
+
       const { sheet, role } = await findSheetForUser(sheetId, socket.user.id);
 
       if (!sheet || !canEdit(role)) {
         socket.emit("socket-error", "You do not have edit permission");
+        if (typeof ack === "function") ack({ ok: false, message: "You do not have edit permission" });
         return;
       }
+
+      if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+        socket.emit("socket-error", "Invalid cell position");
+        if (typeof ack === "function") ack({ ok: false, message: "Invalid cell position" });
+        return;
+      }
+
+      const cell = ensureCell(sheet, Number(rowIndex), Number(colIndex));
+      const previousStyle = { ...(cell.style || {}) };
+      cell.style = {
+        ...defaultCellStyle,
+        ...previousStyle,
+        ...(style || {}),
+      };
+      sheet.markModified("data");
 
       await createChangeLog({
         sheet,
         user: socket.user,
-        rowIndex,
-        colIndex,
-        oldValue: "Previous style",
+        rowIndex: Number(rowIndex),
+        colIndex: Number(colIndex),
+        oldValue: previousStyle,
         newValue: style,
         changeType: "style",
       });
@@ -1021,6 +1166,8 @@ io.on("connection", (socket) => {
       sheet.analytics = {
         ...(sheet.analytics || {}),
         totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+        totalFormulaCells: countFormulaCells(sheet.data),
+        totalMergedCells: sheet.meta?.merges?.length || 0,
         lastEditedBy: socket.user.email,
         lastEditedAt: new Date(),
       };
@@ -1033,12 +1180,20 @@ io.on("connection", (socket) => {
         style,
         updatedBy: socket.user.email,
       });
+
+      if (typeof ack === "function") ack({ ok: true });
     } catch (error) {
       socket.emit("socket-error", "Failed to update cell style");
+      if (typeof ack === "function") ack({ ok: false, message: "Failed to update cell style" });
     }
   });
 
   socket.on("cursor-change", ({ sheetId, rowIndex, colIndex }) => {
+    if (!isValidObjectId(sheetId)) {
+      socket.emit("socket-error", "Invalid sheet id");
+      return;
+    }
+
     socket.to(sheetId).emit("cursor-change", {
       userId: socket.user.id,
       email: socket.user.email,
@@ -1056,6 +1211,22 @@ io.on("connection", (socket) => {
     }
   });
 });
+
+if (process.env.NODE_ENV === "production") {
+  const frontendDistPath = path.resolve(__dirname, "../frontend/dist");
+
+  if (fs.existsSync(frontendDistPath)) {
+    app.use(express.static(frontendDistPath));
+
+    app.use((req, res, next) => {
+      if (req.method !== "GET" || !req.accepts("html")) {
+        return next();
+      }
+
+      return res.sendFile(path.join(frontendDistPath, "index.html"));
+    });
+  }
+}
 
 server.listen(PORT, () => {
   console.log("SaaS API running on port " + PORT);
