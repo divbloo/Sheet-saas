@@ -1031,6 +1031,53 @@ function App() {
     setShareEmail("");
   };
 
+  const removeCollaborator = async (userId) => {
+    if (!selectedSheet || !canManage) return;
+
+    const res = await authFetch(
+      API_URL + "/sheet/" + selectedSheet._id + "/collaborator/" + userId,
+      { method: "DELETE" }
+    );
+    const data = await res.json();
+
+    if (!res.ok) {
+      showMessage(data.message || "Failed to stop sharing");
+      return;
+    }
+
+    setSelectedSheet(normalizeSheet(data.sheet));
+    showMessage("Sharing stopped");
+  };
+
+  const stopAllSharing = async () => {
+    if (!selectedSheet || !canManage) return;
+
+    const collaborators = (selectedSheet.collaborators || []).filter(
+      (user) => user.role !== "owner"
+    );
+
+    if (collaborators.length === 0) {
+      showMessage("No shared users to remove");
+      return;
+    }
+
+    for (const user of collaborators) {
+      const res = await authFetch(
+        API_URL + "/sheet/" + selectedSheet._id + "/collaborator/" + user.userId,
+        { method: "DELETE" }
+      );
+
+      if (!res.ok) {
+        const data = await res.json();
+        showMessage(data.message || "Failed to stop all sharing");
+        return;
+      }
+    }
+
+    await openSheet(selectedSheet._id);
+    showMessage("All sharing stopped");
+  };
+
   const logout = () => {
     sessionStorage.removeItem("token");
     setToken("");
@@ -1114,6 +1161,10 @@ function App() {
         ...defaultErpOptions,
         ...(updatedOptions || {}),
       });
+    });
+
+    socketRef.current.on("collaborators-updated", (collaborators) => {
+      setSelectedSheet((prev) => (prev ? { ...prev, collaborators } : prev));
     });
 
     return () => socketRef.current.disconnect();
@@ -1336,10 +1387,25 @@ function App() {
               </button>
 
               <h4>Sheet Users</h4>
+              {selectedSheet.collaborators?.some((user) => user.role !== "owner") && (
+                <button className="danger-btn" onClick={stopAllSharing}>
+                  Stop All Sharing
+                </button>
+              )}
               {selectedSheet.collaborators?.map((user) => (
                 <div className="user-row" key={user.userId}>
-                  <span>{user.email}</span>
-                  <small>{user.role}</small>
+                  <div>
+                    <span>{user.email}</span>
+                    <small>{user.role}</small>
+                  </div>
+                  {user.role !== "owner" && (
+                    <button
+                      className="user-remove-btn"
+                      onClick={() => removeCollaborator(user.userId)}
+                    >
+                      Stop Share
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

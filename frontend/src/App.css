@@ -325,6 +325,7 @@ select:focus {
   padding: 9px 10px;
   border-radius: 8px;
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
@@ -332,10 +333,22 @@ select:focus {
 .user-row span {
   color: #fff;
   font-size: 13px;
+  display: block;
 }
 
 .user-row small {
   color: #dffdf7;
+}
+
+.drawer-section .user-remove-btn {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #dc2626;
+  color: #ffffff;
+  font-size: 12px;
+  text-align: center;
 }
 
 /* Messages */
