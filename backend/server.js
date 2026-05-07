@@ -104,7 +104,7 @@ const createCell = (value = "") => ({
   style: { ...defaultCellStyle },
 });
 
-const createEmptySheetData = (rows = 500, cols = 20) => {
+const createEmptySheetData = (rows = 500, cols = 16) => {
   return Array.from({ length: rows }, () =>
     Array.from({ length: cols }, () => createCell(""))
   );

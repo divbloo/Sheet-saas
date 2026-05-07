@@ -59,7 +59,7 @@ const erpArabicHeaders = [
   "التأكيد الثالث",
 ];
 
-const COLS = 20;
+const COLS = 16;
 const ROWS = 500;
 const INITIAL_VISIBLE_ROWS = 100;
 const ROW_LOAD_STEP = 100;
@@ -133,7 +133,7 @@ function App() {
   const normalizeData = (data = []) => {
     return Array.from({ length: Math.max(ROWS, data.length) }, (_, r) => {
       const row = data[r] || [];
-      return Array.from({ length: Math.max(COLS, row.length) }, (_, c) =>
+      return Array.from({ length: COLS }, (_, c) =>
         normalizeCell(row[c] || "")
       );
     });
