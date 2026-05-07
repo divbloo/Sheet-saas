@@ -799,6 +799,32 @@ function App() {
     return { ...merge, isMaster };
   };
 
+  const isCellInSelectedRange = (rowIndex, colIndex) => {
+    if (!selectedRange) return false;
+
+    const rowStart = Math.min(selectedRange.start.row, selectedRange.end.row);
+    const rowEnd = Math.max(selectedRange.start.row, selectedRange.end.row);
+    const colStart = Math.min(selectedRange.start.col, selectedRange.end.col);
+    const colEnd = Math.max(selectedRange.start.col, selectedRange.end.col);
+
+    return (
+      rowIndex >= rowStart &&
+      rowIndex <= rowEnd &&
+      colIndex >= colStart &&
+      colIndex <= colEnd
+    );
+  };
+
+  const selectRow = (rowIndex) => {
+    const lastCol = Math.max((selectedSheet?.data?.[rowIndex]?.length || 1) - 1, 0);
+
+    setSelectedCell({ rowIndex, colIndex: 0 });
+    setSelectedRange({
+      start: { row: rowIndex, col: 0 },
+      end: { row: rowIndex, col: lastCol },
+    });
+  };
+
   const resizeCol = (colIndex) => {
     const width = prompt("Column width", selectedSheet?.meta?.colWidths?.[colIndex] || 120);
     if (!width) return;
@@ -1433,7 +1459,18 @@ function App() {
                     key={rowIndex}
                     style={{ height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36 }}
                   >
-                    <th onDoubleClick={() => resizeRow(rowIndex)}>{rowIndex + 1}</th>
+                    <th
+                      className={
+                        selectedRange?.start.row === rowIndex &&
+                        selectedRange?.end.row === rowIndex
+                          ? "selected-row-header"
+                          : ""
+                      }
+                      onMouseDown={() => selectRow(rowIndex)}
+                      onDoubleClick={() => resizeRow(rowIndex)}
+                    >
+                      {rowIndex + 1}
+                    </th>
 
                     {row.map((cell, colIndex) => {
                       const mergeInfo = getMergeInfo(rowIndex, colIndex);
@@ -1442,6 +1479,7 @@ function App() {
                       const normalizedCell = normalizeCell(cell);
                       const isSelected =
                         selectedCell?.rowIndex === rowIndex && selectedCell?.colIndex === colIndex;
+                      const isInSelectedRange = isCellInSelectedRange(rowIndex, colIndex);
 
                       const dropdownOptions = getDropdownOptions(rowIndex, colIndex);
 
@@ -1450,7 +1488,10 @@ function App() {
                           key={rowIndex + "-" + colIndex}
                           rowSpan={mergeInfo ? mergeInfo.rowEnd - mergeInfo.rowStart + 1 : 1}
                           colSpan={mergeInfo ? mergeInfo.colEnd - mergeInfo.colStart + 1 : 1}
-                          className={isSelected ? "selected-cell" : ""}
+                          className={[
+                            isInSelectedRange ? "selected-range-cell" : "",
+                            isSelected ? "selected-cell" : "",
+                          ].filter(Boolean).join(" ")}
                           onMouseDown={() => {
                             setSelectedCell({ rowIndex, colIndex });
                             setSelectedRange({

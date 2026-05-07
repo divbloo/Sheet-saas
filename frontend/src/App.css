@@ -458,8 +458,14 @@ select:focus {
   position: sticky;
   z-index: 4;
   width: 42px;
-  cursor: row-resize;
+  cursor: pointer;
   direction: ltr;
+}
+
+.sheet-table-full tbody th.selected-row-header {
+  background: #0f766e;
+  color: #ffffff;
+  border-color: #0f766e;
 }
 
 .corner-cell {
@@ -509,6 +515,15 @@ select:focus {
   border: 2px solid #0f766e;
   pointer-events: none;
   z-index: 3;
+}
+
+.selected-range-cell {
+  background: #ecfeff;
+}
+
+.selected-range-cell input,
+.selected-range-cell select {
+  background: #ecfeff !important;
 }
 
 .sheet-table-full thead th:not(.corner-cell) {
