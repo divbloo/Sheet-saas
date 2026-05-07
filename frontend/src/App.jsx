@@ -61,8 +61,8 @@ const erpArabicHeaders = [
 
 const COLS = 16;
 const ROWS = 500;
-const INITIAL_VISIBLE_ROWS = 100;
-const ROW_LOAD_STEP = 100;
+const INITIAL_VISIBLE_ROWS = 50;
+const ROW_LOAD_STEP = 50;
 
 function App() {
   const [mode, setMode] = useState("login");
