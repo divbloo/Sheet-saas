@@ -58,6 +58,7 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null);
 
   const [sheets, setSheets] = useState([]);
+  const [sheetSearch, setSheetSearch] = useState("");
   const [selectedSheet, setSelectedSheet] = useState(null);
   const [selectedCell, setSelectedCell] = useState(null);
   const [selectedRange, setSelectedRange] = useState(null);
@@ -590,6 +591,15 @@ function App() {
     return null;
   };
 
+  const validateErpOption = (rowIndex, colIndex, options) => {
+    const value = normalizeCell(selectedSheet?.data?.[rowIndex]?.[colIndex]).value;
+
+    if (!value || options.includes(value)) return;
+
+    updateCell(rowIndex, colIndex, "");
+    showMessage("Select a value from the list");
+  };
+
   const updateSheetData = (updater, options = {}) => {
     if (!canEdit) {
       showMessage("Viewer access: you cannot edit this sheet");
@@ -959,6 +969,18 @@ function App() {
     const wb = XLSX.read(buffer);
     const ws = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    const maxCols = rows.reduce((max, row) => Math.max(max, row.length), 0);
+
+    if (maxCols > COLS) {
+      const ok = window.confirm(
+        "This file has more than 16 columns. Extra columns will be ignored. Continue?"
+      );
+
+      if (!ok) {
+        event.target.value = "";
+        return;
+      }
+    }
 
     const importedData = normalizeData(
       rows.map((row) => row.map((value) => ({ value: value || "", style: defaultCellStyle })))
@@ -1061,6 +1083,10 @@ function App() {
       return;
     }
 
+    const ok = window.confirm("Stop sharing this sheet with all collaborators?");
+
+    if (!ok) return;
+
     for (const user of collaborators) {
       const res = await authFetch(
         API_URL + "/sheet/" + selectedSheet._id + "/collaborator/" + user.userId,
@@ -1094,6 +1120,13 @@ function App() {
       versions: selectedSheet?.meta?.versions?.length || 0,
     };
   }, [sheets, selectedSheet]);
+
+  const filteredSheets = useMemo(() => {
+    const query = sheetSearch.trim().toLowerCase();
+    if (!query) return sheets;
+
+    return sheets.filter((sheet) => sheet.name.toLowerCase().includes(query));
+  }, [sheetSearch, sheets]);
 
   useEffect(() => {
     selectedSheetRef.current = selectedSheet;
@@ -1369,7 +1402,12 @@ function App() {
 
           <div className="drawer-section">
             <h4>Sheets</h4>
-            {sheets.map((s) => (
+            <input
+              placeholder="Search sheets"
+              value={sheetSearch}
+              onChange={(e) => setSheetSearch(e.target.value)}
+            />
+            {filteredSheets.map((s) => (
               <button className="drawer-item" key={s._id} onClick={() => openSheet(s._id)}>
                 {s.name}
               </button>
@@ -1595,6 +1633,7 @@ function App() {
                                   setContextMenu({ x: e.clientX, y: e.clientY });
                                 }}
                                 onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
+                                onBlur={() => validateErpOption(rowIndex, colIndex, dropdownOptions)}
                               />
                               <datalist id={`options-${rowIndex}-${colIndex}`}>
                                 {dropdownOptions.map((option) => (
