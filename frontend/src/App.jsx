@@ -26,7 +26,23 @@ const defaultMeta = {
 };
 
 const defaultErpOptions = {
-  mainGroups: [],
+  mainGroups: [
+    "Consumables",
+    "Dosing & control systems",
+    "Lighting",
+    "Fire Fighting",
+    "Forbes",
+    "Mains Filtration / Softening",
+    "Measuring instruments",
+    "Fittings POU",
+    "Pumps",
+    "Swimming Pool Accessories",
+    "Swimming pool Equipment",
+    "Ventilation",
+    "Water Features",
+    "New Item",
+    "Services",
+  ],
   subGroups: {},
   subSubGroups: {},
   supportGroups: {},
