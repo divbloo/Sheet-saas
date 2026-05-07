@@ -61,6 +61,8 @@ const erpArabicHeaders = [
 
 const COLS = 20;
 const ROWS = 500;
+const INITIAL_VISIBLE_ROWS = 100;
+const ROW_LOAD_STEP = 100;
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -73,6 +75,7 @@ function App() {
   const [selectedSheet, setSelectedSheet] = useState(null);
   const [selectedCell, setSelectedCell] = useState(null);
   const [selectedRange, setSelectedRange] = useState(null);
+  const [visibleRows, setVisibleRows] = useState(INITIAL_VISIBLE_ROWS);
   const [role, setRole] = useState(null);
 
   const [workspaces, setWorkspaces] = useState([]);
@@ -437,6 +440,7 @@ function App() {
     setRole(data.role);
     setSelectedCell(null);
     setSelectedRange(null);
+    setVisibleRows(INITIAL_VISIBLE_ROWS);
     setMenuOpen(false);
 
     await loadErpOptions(id);
@@ -1461,7 +1465,7 @@ function App() {
               </thead>
 
               <tbody>
-                {selectedSheet.data.map((row, rowIndex) => (
+                {selectedSheet.data.slice(0, visibleRows).map((row, rowIndex) => (
                   <tr
                     key={rowIndex}
                     style={{ height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36 }}
@@ -1575,6 +1579,20 @@ function App() {
                 ))}
               </tbody>
             </table>
+
+            {visibleRows < selectedSheet.data.length && (
+              <div className="load-rows-bar">
+                <button
+                  onClick={() =>
+                    setVisibleRows((count) =>
+                      Math.min(count + ROW_LOAD_STEP, selectedSheet.data.length)
+                    )
+                  }
+                >
+                  Load more rows ({visibleRows}/{selectedSheet.data.length})
+                </button>
+              </div>
+            )}
           </div>
 
           {contextMenu && (

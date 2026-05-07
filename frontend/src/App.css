@@ -530,6 +530,26 @@ select:focus {
   cursor: col-resize;
 }
 
+.load-rows-bar {
+  position: sticky;
+  left: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 100vw;
+  padding: 10px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.84), #f8fafc);
+  border-top: 1px solid #cbd5e1;
+}
+
+.load-rows-bar button {
+  background: #0f766e;
+  color: #ffffff;
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-weight: 700;
+}
+
 /* Context Menu */
 
 .context-menu {
