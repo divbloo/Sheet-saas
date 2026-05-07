@@ -23,6 +23,7 @@ const {
   getFrontendUrls,
   verifyProductionSecurity,
 } = require("./config/security");
+const defaultErpOptions = require("./config/defaultErpOptions.json");
 const { isValidCellIndex, isValidObjectId } = require("./utils/validation");
 
 const app = express();
@@ -159,40 +160,7 @@ const createDefaultMeta = () => ({
   versions: [],
 });
 
-const createDefaultErpOptions = () => ({
-  mainGroups: [
-    "Consumables",
-    "Dosing & control systems",
-    "Lighting",
-    "Fire Fighting",
-    "Forbes",
-    "Mains Filtration / Softening",
-    "Measuring instruments",
-    "Fittings",
-    "POU",
-    "Pumps",
-    "Swimming Pool Accessories",
-    "Swimming pool Equipment",
-    "Ventilation",
-    "Water Features",
-    "New Item",
-    "Services",
-    "W.W Equipments",
-    "Pots",
-    "Lightening",
-  ],
-  subGroups: {},
-  subSubGroups: {},
-  supportGroups: {},
-  detailedGroups: {},
-  units: [],
-  packages: [],
-  shelfLife: [],
-  sequence: [],
-  confirmation1: [],
-  confirmation2: [],
-  confirmation3: [],
-});
+const createDefaultErpOptions = () => JSON.parse(JSON.stringify(defaultErpOptions));
 
 const colName = (index) => {
   let name = "";

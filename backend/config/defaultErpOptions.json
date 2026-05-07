@@ -1,0 +1,620 @@
+{
+  "mainGroups": [
+    "Consumables",
+    "Dosing & control systems",
+    "Fire Fighting",
+    "Fittings",
+    "Forbes",
+    "Lightening",
+    "Lighting",
+    "Mains Filtration / Softening",
+    "Measuring instruments",
+    "New Item",
+    "Pots",
+    "POU",
+    "Pumps",
+    "Services",
+    "Swimming Pool Accessories",
+    "Swimming pool Equipment",
+    "Ventilation",
+    "W.W Equipments",
+    "Water Features"
+  ],
+  "subGroups": {
+    "Consumables": [
+      "Anti-scalent",
+      "Biosite chemicals",
+      "Boiler chemicals",
+      "Commodity chemicals",
+      "Cooling system chemicals",
+      "Disinfection Chemical",
+      "Domestic water chemicals",
+      "Oil and Gaz",
+      "Polymer For Waste Water Treatment",
+      "Process Chemical",
+      "Swimming Pool Chemical",
+      "THE SPECIALIZED",
+      "Waste Water Treatment"
+    ],
+    "Dosing & control systems": [
+      "Control System",
+      "Dosing pumps",
+      "Easiflo",
+      "Feeders",
+      "Flow Meter",
+      "Mixers"
+    ],
+    "Fire Fighting": [
+      "Fire Fighting Fitting"
+    ],
+    "Fittings": [
+      "Electricity",
+      "Fitting",
+      "Metal works",
+      "Plastics",
+      "Screens and Strainers"
+    ],
+    "Forbes": [
+      "Manual valves",
+      "Steam accessories",
+      "Steam boilers",
+      "Steam Trabs"
+    ],
+    "Lightening": [
+      "S. Pool Lighting"
+    ],
+    "Lighting": [
+      "S. Pool Lighting"
+    ],
+    "Mains Filtration / Softening": [
+      "Disinfection",
+      "Filteration & Softeners",
+      "Media",
+      "Tanks"
+    ],
+    "Measuring instruments": [
+      "Equipment",
+      "Reagent",
+      "Spare Parts"
+    ],
+    "New Item": [
+      "New Item"
+    ],
+    "Pots": [
+      "Pots"
+    ],
+    "POU": [
+      "Reverse osmosis (RO)"
+    ],
+    "Pumps": [
+      "Filteration",
+      "Horizontal pumps",
+      "Submersible pumps",
+      "Water Pump"
+    ],
+    "Services": [
+      "General",
+      "Hospitality Services",
+      "Projects Services"
+    ],
+    "Swimming Pool Accessories": [
+      "Accessories"
+    ],
+    "Swimming pool Equipment": [
+      "Pool Heating",
+      "Pool surround equipment",
+      "S. Pool Filtration",
+      "S. Pool Pumps"
+    ],
+    "Ventilation": [
+      "Decorative fans",
+      "Wall-mounted fans"
+    ],
+    "W.W Equipments": [
+      "Air Blower",
+      "Air Diffusers",
+      "Pre- treatment Systems"
+    ],
+    "Water Features": [
+      "Aerators",
+      "Air Blower",
+      "Circulators",
+      "Fountains",
+      "Lighting",
+      "Spear Parts"
+    ]
+  },
+  "subSubGroups": {
+    "Accessories": [
+      "Non Consumable"
+    ],
+    "Aerators": [
+      "Non Consumable"
+    ],
+    "Air Blower": [
+      "Non Consumable"
+    ],
+    "Air Diffusers": [
+      "Non Consumable"
+    ],
+    "Anti-scalent": [
+      "Consumable"
+    ],
+    "Biosite chemicals": [
+      "Non Consumable"
+    ],
+    "Boiler chemicals": [
+      "Consumable"
+    ],
+    "Circulators": [
+      "Non Consumable"
+    ],
+    "Commodity chemicals": [
+      "Consumable"
+    ],
+    "Control System": [
+      "Non Consumable"
+    ],
+    "Cooling system chemicals": [
+      "Consumable"
+    ],
+    "Decorative fans": [
+      "Non Consumable"
+    ],
+    "Disinfection": [
+      "Non Consumable"
+    ],
+    "Disinfection Chemical": [
+      "Consumable"
+    ],
+    "Domestic water chemicals": [
+      "Consumable"
+    ],
+    "Dosing pumps": [
+      "Non Consumable"
+    ],
+    "Easiflo": [
+      "Non Consumable"
+    ],
+    "Electricity": [
+      "Non Consumable"
+    ],
+    "Equipment": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Feeders": [
+      "Non Consumable"
+    ],
+    "Filteration": [
+      "Non Consumable"
+    ],
+    "Filteration & Softeners": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Fire Fighting Fitting": [
+      "Non Consumable"
+    ],
+    "Fitting": [
+      "Non Consumable"
+    ],
+    "Flow Meter": [
+      "Non Consumable"
+    ],
+    "Fountains": [
+      "Non Consumable"
+    ],
+    "General": [
+      "Services"
+    ],
+    "Horizontal pumps": [
+      "Non Consumable"
+    ],
+    "Hospitality Services": [
+      "Services"
+    ],
+    "Lighting": [
+      "Non Consumable"
+    ],
+    "Manual valves": [
+      "Non Consumable"
+    ],
+    "Media": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Metal works": [
+      "Non Consumable"
+    ],
+    "Mixers": [
+      "Non Consumable"
+    ],
+    "New Item": [
+      "New Item"
+    ],
+    "Oil and Gaz": [
+      "Consumable"
+    ],
+    "Plastics": [
+      "Non Consumable"
+    ],
+    "Polymer For Waste Water Treatment": [
+      "Consumable"
+    ],
+    "Pool Heating": [
+      "Non Consumable"
+    ],
+    "Pool surround equipment": [
+      "Non Consumable"
+    ],
+    "Pots": [
+      "Non Consumable"
+    ],
+    "Pre- treatment Systems": [
+      "Non Consumable"
+    ],
+    "Process Chemical": [
+      "Consumable"
+    ],
+    "Projects Services": [
+      "Services"
+    ],
+    "Reagent": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Reverse osmosis (RO)": [
+      "Non Consumable"
+    ],
+    "S. Pool Filtration": [
+      "Non Consumable"
+    ],
+    "S. Pool Lighting": [
+      "Non Consumable"
+    ],
+    "S. Pool Pumps": [
+      "Non Consumable"
+    ],
+    "Screens and Strainers": [
+      "Non Consumable"
+    ],
+    "Spare Parts": [
+      "Non Consumable"
+    ],
+    "Spear Parts": [
+      "Non Consumable"
+    ],
+    "Steam accessories": [
+      "Non Consumable"
+    ],
+    "Steam boilers": [
+      "Non Consumable"
+    ],
+    "Steam Trabs": [
+      "Non Consumable"
+    ],
+    "Submersible pumps": [
+      "Non Consumable"
+    ],
+    "Swimming Pool Chemical": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Tanks": [
+      "Non Consumable"
+    ],
+    "THE SPECIALIZED": [
+      "Consumable",
+      "Non Consumable"
+    ],
+    "Wall-mounted fans": [
+      "Non Consumable"
+    ],
+    "Waste Water Treatment": [
+      "Consumable"
+    ],
+    "Water Pump": [
+      "Non Consumable"
+    ]
+  },
+  "supportGroups": {
+    "Consumable": [
+      "China",
+      "Fluidra",
+      "Hebbi",
+      "JAL AQUA",
+      "Local",
+      "Lonza",
+      "Organic Industries",
+      "Other",
+      "PUROLITE",
+      "SNF",
+      "Suze",
+      "Tintometer"
+    ],
+    "New Item": [
+      "New Item"
+    ],
+    "Non Consumable": [
+      "ACIS MME",
+      "Aqua",
+      "AQUA",
+      "Aquatics Plus",
+      "Arihant",
+      "ARIHANT INDUSTRIAL CORPORATION LIMITED",
+      "Atlants",
+      "AZUD",
+      "Bomba",
+      "Calpeda",
+      "Certikin",
+      "China",
+      "Clack",
+      "Cosasco",
+      "Creative",
+      "E-shak",
+      "Ebara",
+      "Elecro",
+      "Emec",
+      "ENCON",
+      "Fiberpool",
+      "Fluidra",
+      "Forbes Marshall",
+      "Gemas",
+      "Grundfos",
+      "Hayward",
+      "Headworks",
+      "Kasco",
+      "Kripsol",
+      "Local",
+      "Lonza",
+      "LTH",
+      "Other",
+      "Pedrollo",
+      "Pentair Water India Private Limited",
+      "Pentair Water Italy",
+      "Pentair-Fleck",
+      "Pentair-Siata",
+      "Pulsafeeder",
+      "Qingdao Jinhuimo International Trading Co., Ltd.",
+      "Salher",
+      "Salher - PRESSURE CONTROLLER FOR SLUDGE FEEDING",
+      "Seko",
+      "Shneider",
+      "Sollight",
+      "Splash",
+      "Suze",
+      "Tintometer",
+      "Tpots",
+      "Tsurumi",
+      "UNEX",
+      "Uni Vent",
+      "Vac-Alert Industries, LLC",
+      "VEOLIA Water Technologies & Solutions",
+      "Weda AB",
+      "Winters",
+      "Wonder Light",
+      "Xi'an Huafan Technology co.,Ltd"
+    ],
+    "Services": [
+      "Local"
+    ]
+  },
+  "detailedGroups": {
+    "ACIS MME": [
+      "Local"
+    ],
+    "Aqua": [
+      "Local"
+    ],
+    "AQUA": [
+      "Local"
+    ],
+    "Aquatics Plus": [
+      "Imported"
+    ],
+    "Arihant": [
+      "Local"
+    ],
+    "ARIHANT INDUSTRIAL CORPORATION LIMITED": [
+      "Local"
+    ],
+    "Atlants": [
+      "Imported"
+    ],
+    "AZUD": [
+      "Imported"
+    ],
+    "Bomba": [
+      "Local"
+    ],
+    "Calpeda": [
+      "Local"
+    ],
+    "Certikin": [
+      "Local"
+    ],
+    "China": [
+      "Local"
+    ],
+    "Clack": [
+      "Local"
+    ],
+    "Cosasco": [
+      "Imported"
+    ],
+    "Creative": [
+      "Local"
+    ],
+    "E-shak": [
+      "Local"
+    ],
+    "Ebara": [
+      "Local"
+    ],
+    "Elecro": [
+      "Local"
+    ],
+    "Emec": [
+      "Local"
+    ],
+    "ENCON": [
+      "Imported"
+    ],
+    "Fiberpool": [
+      "Local"
+    ],
+    "Fluidra": [
+      "Local"
+    ],
+    "Forbes Marshall": [
+      "Imported"
+    ],
+    "Gemas": [
+      "Local"
+    ],
+    "Grundfos": [
+      "Local"
+    ],
+    "Hayward": [
+      "Local"
+    ],
+    "Headworks": [
+      "Imported"
+    ],
+    "Hebbi": [
+      "Imported"
+    ],
+    "JAL AQUA": [
+      "Imported"
+    ],
+    "Kasco": [
+      "Imported"
+    ],
+    "Kripsol": [
+      "Local"
+    ],
+    "Local": [
+      "ABB",
+      "Imported",
+      "Local"
+    ],
+    "Lonza": [
+      "Imported",
+      "Local"
+    ],
+    "LTH": [
+      "Imported",
+      "Local"
+    ],
+    "New Item": [
+      "New Item"
+    ],
+    "Organic Industries": [
+      "Imported"
+    ],
+    "Other": [
+      "Imported"
+    ],
+    "Pedrollo": [
+      "Local"
+    ],
+    "Pentair Water India Private Limited": [
+      "Imported"
+    ],
+    "Pentair Water Italy": [
+      "Imported"
+    ],
+    "Pentair-Fleck": [
+      "Imported"
+    ],
+    "Pentair-Siata": [
+      "Imported"
+    ],
+    "Pulsafeeder": [
+      "Imported"
+    ],
+    "PUROLITE": [
+      "Imported"
+    ],
+    "Qingdao Jinhuimo International Trading Co., Ltd.": [
+      "Imported"
+    ],
+    "Salher": [
+      "Imported"
+    ],
+    "Salher - PRESSURE CONTROLLER FOR SLUDGE FEEDING": [
+      "Imported"
+    ],
+    "Seko": [
+      "Imported",
+      "Local"
+    ],
+    "Shneider": [
+      "Local"
+    ],
+    "SNF": [
+      "Imported"
+    ],
+    "Sollight": [
+      "Local"
+    ],
+    "Splash": [
+      "Local"
+    ],
+    "Suze": [
+      "Imported"
+    ],
+    "Tintometer": [
+      "Imported",
+      "Local"
+    ],
+    "Tpots": [
+      "Local"
+    ],
+    "Tsurumi": [
+      "Local"
+    ],
+    "UNEX": [
+      "Local"
+    ],
+    "Uni Vent": [
+      "Local"
+    ],
+    "Vac-Alert Industries, LLC": [
+      "Imported"
+    ],
+    "VEOLIA Water Technologies & Solutions": [
+      "Imported",
+      "Local"
+    ],
+    "Weda AB": [
+      "Local"
+    ],
+    "Winters": [
+      "Local"
+    ],
+    "Wonder Light": [
+      "Local"
+    ],
+    "Xi'an Huafan Technology co.,Ltd": [
+      "Imported"
+    ]
+  },
+  "units": [
+    "Drum",
+    "KG",
+    "Litter",
+    "Pail",
+    "PCS",
+    "Sac",
+    "Strip",
+    "Tablet"
+  ],
+  "packages": [],
+  "shelfLife": [],
+  "sequence": [],
+  "confirmation1": [],
+  "confirmation2": [],
+  "confirmation3": []
+}

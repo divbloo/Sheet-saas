@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import defaultErpOptions from "./defaultErpOptions.json";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
@@ -23,41 +24,6 @@ const defaultMeta = {
   rowHeights: {},
   merges: [],
   versions: [],
-};
-
-const defaultErpOptions = {
-  mainGroups: [
-    "Consumables",
-    "Dosing & control systems",
-    "Lighting",
-    "Fire Fighting",
-    "Forbes",
-    "Mains Filtration / Softening",
-    "Measuring instruments",
-    "Fittings",
-    "POU",
-    "Pumps",
-    "Swimming Pool Accessories",
-    "Swimming pool Equipment",
-    "Ventilation",
-    "Water Features",
-    "New Item",
-    "Services",
-    "W.W Equipments",
-    "Pots",
-    "Lightening",
-  ],
-  subGroups: {},
-  subSubGroups: {},
-  supportGroups: {},
-  detailedGroups: {},
-  units: [],
-  packages: [],
-  shelfLife: [],
-  sequence: [],
-  confirmation1: [],
-  confirmation2: [],
-  confirmation3: [],
 };
 
 const erpArabicHeaders = [
