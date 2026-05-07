@@ -1511,30 +1511,31 @@ function App() {
                           }}
                         >
                           {dropdownOptions ? (
-                            <select
-                              value={normalizedCell.value}
-                              disabled={!canEdit}
-                              style={{
-                                ...normalizedCell.style,
-                                width: getColumnWidth(colIndex),
-                                height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36,
-                              }}
-                              onFocus={() => setSelectedCell({ rowIndex, colIndex })}
-                              onContextMenu={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setSelectedCell({ rowIndex, colIndex });
-                                setContextMenu({ x: e.clientX, y: e.clientY });
-                              }}
-                              onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
-                            >
-                              <option value=""></option>
-                              {dropdownOptions.map((option) => (
-                                <option key={option} value={option}>
-                                  {option}
-                                </option>
-                              ))}
-                            </select>
+                            <>
+                              <input
+                                list={`options-${rowIndex}-${colIndex}`}
+                                value={normalizedCell.value}
+                                disabled={!canEdit}
+                                style={{
+                                  ...normalizedCell.style,
+                                  width: getColumnWidth(colIndex),
+                                  height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36,
+                                }}
+                                onFocus={() => setSelectedCell({ rowIndex, colIndex })}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setSelectedCell({ rowIndex, colIndex });
+                                  setContextMenu({ x: e.clientX, y: e.clientY });
+                                }}
+                                onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
+                              />
+                              <datalist id={`options-${rowIndex}-${colIndex}`}>
+                                {dropdownOptions.map((option) => (
+                                  <option key={option} value={option} />
+                                ))}
+                              </datalist>
+                            </>
                           ) : (
                             <input
                               value={normalizedCell.value}
