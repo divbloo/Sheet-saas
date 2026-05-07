@@ -611,10 +611,25 @@
     "Strip",
     "Tablet"
   ],
-  "packages": [],
-  "shelfLife": [],
-  "sequence": [],
-  "confirmation1": [],
-  "confirmation2": [],
-  "confirmation3": []
+  "packages": [
+    "yes",
+    "no"
+  ],
+  "shelfLife": [
+    "yes",
+    "no"
+  ],
+  "sequence": [
+    "yes",
+    "no"
+  ],
+  "confirmation1": [
+    "confirmed"
+  ],
+  "confirmation2": [
+    "confirmed"
+  ],
+  "confirmation3": [
+    "confirmed"
+  ]
 }
