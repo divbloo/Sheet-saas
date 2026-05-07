@@ -104,7 +104,7 @@ const createCell = (value = "") => ({
   style: { ...defaultCellStyle },
 });
 
-const createEmptySheetData = (rows = 60, cols = 20) => {
+const createEmptySheetData = (rows = 500, cols = 20) => {
   return Array.from({ length: rows }, () =>
     Array.from({ length: cols }, () => createCell(""))
   );
@@ -150,7 +150,10 @@ const applyCellPatch = (sheet, patch) => {
 };
 
 const createDefaultMeta = () => ({
-  colWidths: {},
+  colWidths: {
+    0: 220,
+    1: 280,
+  },
   rowHeights: {},
   merges: [],
   versions: [],

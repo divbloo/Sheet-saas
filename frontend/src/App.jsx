@@ -16,7 +16,10 @@ const defaultCellStyle = {
 };
 
 const defaultMeta = {
-  colWidths: {},
+  colWidths: {
+    0: 220,
+    1: 280,
+  },
   rowHeights: {},
   merges: [],
   versions: [],
@@ -57,7 +60,7 @@ const erpArabicHeaders = [
 ];
 
 const COLS = 20;
-const ROWS = 60;
+const ROWS = 500;
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -155,6 +158,10 @@ function App() {
 
   const colName = (index) => {
     return erpArabicHeaders[index] || `Column ${index + 1}`;
+  };
+
+  const getColumnWidth = (colIndex) => {
+    return selectedSheet?.meta?.colWidths?.[colIndex] || defaultMeta.colWidths[colIndex] || 120;
   };
 
   const cellAddress = (row, col) => excelColName(col) + (row + 1);
@@ -826,7 +833,7 @@ function App() {
   };
 
   const resizeCol = (colIndex) => {
-    const width = prompt("Column width", selectedSheet?.meta?.colWidths?.[colIndex] || 120);
+    const width = prompt("Column width", getColumnWidth(colIndex));
     if (!width) return;
 
     setSelectedSheet((prev) => ({
@@ -1445,7 +1452,7 @@ function App() {
                     <th
                       key={colIndex}
                       onDoubleClick={() => resizeCol(colIndex)}
-                      style={{ width: selectedSheet.meta?.colWidths?.[colIndex] || 120 }}
+                      style={{ width: getColumnWidth(colIndex) }}
                     >
                       {colName(colIndex)}
                     </th>
@@ -1519,7 +1526,7 @@ function App() {
                               disabled={!canEdit}
                               style={{
                                 ...normalizedCell.style,
-                                width: selectedSheet.meta?.colWidths?.[colIndex] || 120,
+                                width: getColumnWidth(colIndex),
                                 height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36,
                               }}
                               onFocus={() => setSelectedCell({ rowIndex, colIndex })}
@@ -1544,7 +1551,7 @@ function App() {
                               disabled={!canEdit || (colIndex === 1 && rowIndex > 0)}
                               style={{
                                 ...normalizedCell.style,
-                                width: selectedSheet.meta?.colWidths?.[colIndex] || 120,
+                                width: getColumnWidth(colIndex),
                                 height: selectedSheet.meta?.rowHeights?.[rowIndex] || 36,
                                 backgroundColor:
                                   colIndex === 1 && rowIndex > 0
