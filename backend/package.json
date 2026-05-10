@@ -15,6 +15,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
+    "migrate:rows": "node scripts/migrateSheetRows.js",
     "test": "node --test",
     "start": "node server.js"
   },

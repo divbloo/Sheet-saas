@@ -8,6 +8,7 @@
     "dev": "node scripts/dev.js",
     "lint": "npm --prefix frontend run lint",
     "build": "npm --prefix frontend run build",
+    "migrate:rows": "npm --prefix backend run migrate:rows",
     "test": "npm --prefix backend test"
   }
 }

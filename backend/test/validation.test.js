@@ -17,11 +17,12 @@ test("isValidObjectId rejects malformed and non-canonical ids", () => {
 test("isValidCellIndex accepts bounded non-negative integers", () => {
   assert.equal(isValidCellIndex(0), true);
   assert.equal(isValidCellIndex(9999), true);
+  assert.equal(isValidCellIndex(999999), true);
 });
 
 test("isValidCellIndex rejects unsafe indexes", () => {
   assert.equal(isValidCellIndex(-1), false);
-  assert.equal(isValidCellIndex(10000), false);
+  assert.equal(isValidCellIndex(1000000), false);
   assert.equal(isValidCellIndex(1.5), false);
   assert.equal(isValidCellIndex("1"), false);
 });

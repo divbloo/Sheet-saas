@@ -9,7 +9,7 @@ const isValidObjectId = (id) => {
 };
 
 const isValidCellIndex = (index) => {
-  return Number.isInteger(index) && index >= 0 && index < 10000;
+  return Number.isInteger(index) && index >= 0 && index < 1000000;
 };
 
 module.exports = {

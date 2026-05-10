@@ -4,6 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const zlib = require("zlib");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -14,6 +15,7 @@ const { Server } = require("socket.io");
 
 const User = require("./models/User");
 const Sheet = require("./models/Sheet");
+const SheetRow = require("./models/SheetRow");
 const Workspace = require("./models/Workspace");
 const ChangeLog = require("./models/ChangeLog");
 const {
@@ -25,6 +27,13 @@ const {
 } = require("./config/security");
 const defaultErpOptions = require("./config/defaultErpOptions.json");
 const { isValidCellIndex, isValidObjectId } = require("./utils/validation");
+const {
+  DEFAULT_SHEET_COLS,
+  buildRowSearchText,
+  createCell,
+  defaultCellStyle,
+  normalizeRowCells,
+} = require("./utils/sheetRows");
 
 const app = express();
 const server = http.createServer(app);
@@ -32,6 +41,33 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const FRONTEND_URLS = getFrontendUrls();
 const corsOptions = createCorsOptions(FRONTEND_URLS);
+
+const escapeCsvCell = (value) => {
+  const text = String(value ?? "");
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const sendJson = (req, res, payload) => {
+  const body = JSON.stringify(payload);
+
+  if (!String(req.headers["accept-encoding"] || "").includes("gzip")) {
+    res.type("application/json").send(body);
+    return;
+  }
+
+  zlib.gzip(body, (error, compressed) => {
+    if (error) {
+      res.type("application/json").send(body);
+      return;
+    }
+
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.send(compressed);
+  });
+};
 
 const io = new Server(server, {
   cors: {
@@ -88,73 +124,38 @@ mongoose
   .then(() => console.log("DB Connected"))
   .catch((err) => console.error("DB Connection Error:", err));
 
-const defaultCellStyle = {
-  fontWeight: "normal",
-  fontStyle: "normal",
-  textDecoration: "none",
-  color: "#111827",
-  backgroundColor: "#ffffff",
-  fontSize: "14px",
-  fontFamily: "Arial",
-  textAlign: "left",
+const DEFAULT_COLUMN_WIDTHS = {
+  0: 300,
+  1: 300,
+  2: 220,
+  3: 220,
+  4: 145,
+  5: 220,
+  6: 145,
+  7: 82,
+  8: 60,
+  9: 60,
+  10: 60,
+  11: 150,
+  12: 92,
+  13: 150,
+  14: 92,
+  15: 92,
 };
 
-const createCell = (value = "") => ({
-  value,
-  formula: "",
-  style: { ...defaultCellStyle },
-});
+const DEFAULT_SHEET_ROWS = 500;
+const DEFAULT_ROW_PAGE_SIZE = 50;
+const MAX_ROW_PAGE_SIZE = 500;
+const ALLOWED_SHEET_TYPES = new Set(["custom", "item-master"]);
 
-const createEmptySheetData = (rows = 500, cols = 16) => {
+const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_COLS) => {
   return Array.from({ length: rows }, () =>
     Array.from({ length: cols }, () => createCell(""))
   );
 };
 
-const ensureCell = (sheet, rowIndex, colIndex) => {
-  while (sheet.data.length <= rowIndex) {
-    sheet.data.push([]);
-  }
-
-  while (sheet.data[rowIndex].length <= colIndex) {
-    sheet.data[rowIndex].push(createCell(""));
-  }
-
-  const cell = sheet.data[rowIndex][colIndex];
-
-  if (!cell || typeof cell !== "object") {
-    sheet.data[rowIndex][colIndex] = createCell(cell || "");
-  }
-
-  return sheet.data[rowIndex][colIndex];
-};
-
-const applyCellPatch = (sheet, patch) => {
-  const rowIndex = Number(patch.rowIndex);
-  const colIndex = Number(patch.colIndex);
-
-  if (!isValidCellIndex(rowIndex) || !isValidCellIndex(colIndex)) {
-    return null;
-  }
-
-  const cell = ensureCell(sheet, rowIndex, colIndex);
-
-  cell.value = patch.value ?? "";
-  cell.formula = patch.formula || "";
-  cell.style = {
-    ...defaultCellStyle,
-    ...(cell.style || {}),
-    ...(patch.style || {}),
-  };
-
-  return { rowIndex, colIndex, cell };
-};
-
 const createDefaultMeta = () => ({
-  colWidths: {
-    0: 220,
-    1: 280,
-  },
+  colWidths: { ...DEFAULT_COLUMN_WIDTHS },
   rowHeights: {},
   merges: [],
   versions: [],
@@ -360,6 +361,18 @@ const findSheetForUser = async (sheetId, userId) => {
   return { sheet, role };
 };
 
+const findSheetForUserProjected = async (sheetId, userId, projection) => {
+  const sheet = await Sheet.findById(sheetId, projection);
+
+  if (!sheet) {
+    return { sheet: null, role: null };
+  }
+
+  const role = getUserRole(sheet, userId);
+
+  return { sheet, role };
+};
+
 const getWorkspaceRole = (workspace, userId) => {
   const member = workspace.members.find(
     (item) => item.userId.toString() === userId.toString()
@@ -383,6 +396,203 @@ const countFormulaCells = (data = []) => {
   });
 
   return count;
+};
+
+const countFormulaCellsInRows = async (sheetId) => {
+  const [result] = await SheetRow.aggregate([
+    { $match: { sheetId: new mongoose.Types.ObjectId(sheetId) } },
+    { $unwind: "$cells" },
+    { $match: { "cells.formula": { $nin: [null, ""] } } },
+    { $count: "count" },
+  ]);
+
+  return result?.count || 0;
+};
+
+const migrateSheetRowsIfNeeded = async (sheet) => {
+  if (!sheet) return;
+
+  const existingRowCount = await SheetRow.countDocuments({ sheetId: sheet._id });
+  if (existingRowCount > 0) return;
+
+  const sourceRows = Array.isArray(sheet.data) && sheet.data.length > 0
+    ? sheet.data
+    : createEmptySheetData();
+
+  if (sourceRows.length > 0) {
+    try {
+      await SheetRow.insertMany(
+      sourceRows.map((row, rowIndex) => ({
+        sheetId: sheet._id,
+        rowIndex,
+        cells: normalizeRowCells(row),
+        searchText: buildRowSearchText(row),
+      })),
+        { ordered: false }
+      );
+    } catch (error) {
+      if (error?.code !== 11000 && error?.name !== "MongoBulkWriteError") {
+        throw error;
+      }
+    }
+  }
+
+  sheet.data = [];
+  sheet.markModified("data");
+  await sheet.save();
+};
+
+const ensureSheetRowsSearchText = async (sheetId) => {
+  const missingCount = await SheetRow.countDocuments({
+    sheetId,
+    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
+  });
+
+  if (missingCount === 0) return;
+
+  const cursor = SheetRow.find({
+    sheetId,
+    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
+  }).cursor();
+  const operations = [];
+
+  for await (const row of cursor) {
+    operations.push({
+      updateOne: {
+        filter: { _id: row._id },
+        update: { $set: { searchText: buildRowSearchText(row.cells) } },
+      },
+    });
+
+    if (operations.length >= 500) {
+      await SheetRow.bulkWrite(operations);
+      operations.length = 0;
+    }
+  }
+
+  if (operations.length > 0) {
+    await SheetRow.bulkWrite(operations);
+  }
+};
+
+const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE) => {
+  const rows = await SheetRow.find({ sheetId, rowIndex: { $gte: start, $lt: start + limit } })
+    .sort({ rowIndex: 1 })
+    .lean();
+  const rowMap = new Map(rows.map((row) => [row.rowIndex, normalizeRowCells(row.cells)]));
+
+  return Array.from({ length: limit }, (_, offset) => (
+    rowMap.get(start + offset) || normalizeRowCells([])
+  ));
+};
+
+const getSheetRowCount = async (sheetId) => {
+  const lastRow = await SheetRow.findOne({ sheetId }).sort({ rowIndex: -1 }).select("rowIndex").lean();
+  return lastRow ? lastRow.rowIndex + 1 : 0;
+};
+
+const appendRowsToSheet = async (sheetId, count) => {
+  const start = await getSheetRowCount(sheetId);
+  const rows = createEmptySheetData(count, DEFAULT_SHEET_COLS);
+
+  await SheetRow.insertMany(
+    rows.map((row, offset) => ({
+      sheetId,
+      rowIndex: start + offset,
+      cells: row,
+      searchText: buildRowSearchText(row),
+    }))
+  );
+
+  return { rows, start, total: start + rows.length };
+};
+
+const ensureSheetRow = async (sheetId, rowIndex) => {
+  let row = await SheetRow.findOne({ sheetId, rowIndex });
+
+  if (!row) {
+    row = await SheetRow.create({
+      sheetId,
+      rowIndex,
+      cells: normalizeRowCells([]),
+      searchText: "",
+    });
+  }
+
+  row.cells = normalizeRowCells(row.cells);
+  return row;
+};
+
+const applyCellPatchToRows = async (sheetId, patch) => {
+  const rowIndex = Number(patch.rowIndex);
+  const colIndex = Number(patch.colIndex);
+
+  if (!isValidCellIndex(rowIndex) || !isValidCellIndex(colIndex)) {
+    return null;
+  }
+
+  const row = await ensureSheetRow(sheetId, rowIndex);
+  const currentCell = row.cells[colIndex] || createCell("");
+
+  row.cells[colIndex] = {
+    ...currentCell,
+    value: patch.value ?? "",
+    formula: patch.formula || "",
+    style: {
+      ...defaultCellStyle,
+      ...(currentCell.style || {}),
+      ...(patch.style || {}),
+    },
+  };
+  row.searchText = buildRowSearchText(row.cells);
+
+  row.markModified("cells");
+  row.markModified("searchText");
+  await row.save();
+
+  return { rowIndex, colIndex, cell: row.cells[colIndex] };
+};
+
+const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value, formula, patches }) => {
+  const normalizedPatches = Array.isArray(patches) && patches.length > 0
+    ? patches.slice(0, 50)
+    : [{ rowIndex, colIndex, value, formula }];
+  const numericRowIndex = Number(rowIndex);
+  const numericColIndex = Number(colIndex);
+
+  await migrateSheetRowsIfNeeded(sheet);
+
+  const oldRow = await ensureSheetRow(sheet._id, numericRowIndex);
+  const oldCell = oldRow.cells?.[numericColIndex] || "";
+  const oldValue =
+    oldCell && typeof oldCell === "object" ? oldCell.value : oldCell;
+
+  await createChangeLog({
+    sheet,
+    user,
+    rowIndex: numericRowIndex,
+    colIndex: numericColIndex,
+    oldValue,
+    newValue: formula || value,
+    changeType: formula || String(value).startsWith("=") ? "formula" : "value",
+  });
+
+  await Promise.all(
+    normalizedPatches.map((patch) => applyCellPatchToRows(sheet._id, patch))
+  );
+
+  sheet.analytics = {
+    ...(sheet.analytics || {}),
+    totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+    totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+    totalMergedCells: sheet.meta?.merges?.length || 0,
+    lastEditedBy: user.email,
+    lastEditedAt: new Date(),
+  };
+
+  await sheet.save();
+
+  return normalizedPatches;
 };
 
 const createChangeLog = async ({
@@ -609,13 +819,19 @@ app.post("/sheet", auth, async (req, res) => {
     }
 
     const erpType = req.body.erpType || "custom";
+
+    if (!ALLOWED_SHEET_TYPES.has(erpType)) {
+      return res.status(400).json({ message: "Invalid sheet type" });
+    }
+
     const isERP = erpType !== "custom";
+    const initialRows = isERP ? createERPTemplateData(erpType) : createEmptySheetData();
 
     const sheet = await Sheet.create({
       name: req.body.name || "New Sheet",
       workspaceId,
       createdBy: req.user.id,
-      data: isERP ? createERPTemplateData(erpType) : createEmptySheetData(),
+      data: [],
       meta: createDefaultMeta(),
       erpTemplate: {
         enabled: isERP,
@@ -640,6 +856,15 @@ app.post("/sheet", auth, async (req, res) => {
       ],
     });
 
+    await SheetRow.insertMany(
+      initialRows.map((row, rowIndex) => ({
+        sheetId: sheet._id,
+        rowIndex,
+        cells: normalizeRowCells(row),
+        searchText: buildRowSearchText(row),
+      }))
+    );
+
     res.status(201).json(sheet);
   } catch (error) {
     res.status(500).json({ message: "Failed to create sheet" });
@@ -660,7 +885,9 @@ app.get("/sheets", auth, async (req, res) => {
       filter.workspaceId = req.query.workspaceId;
     }
 
-    const sheets = await Sheet.find(filter).sort({ updatedAt: -1 });
+    const sheets = await Sheet.find(filter)
+      .select("-data")
+      .sort({ updatedAt: -1 });
 
     res.json(sheets);
   } catch (error) {
@@ -670,20 +897,151 @@ app.get("/sheets", auth, async (req, res) => {
 
 app.get("/sheet/:id", auth, async (req, res) => {
   try {
+    const rowLimit = Math.min(
+      Number.parseInt(req.query.rowLimit, 10) || DEFAULT_ROW_PAGE_SIZE,
+      MAX_ROW_PAGE_SIZE
+    );
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
 
     if (!sheet || !canRead(role)) {
       return res.status(404).json({ message: "Sheet not found or access denied" });
     }
 
+    await migrateSheetRowsIfNeeded(sheet);
+
     if (!sheet.meta) sheet.meta = createDefaultMeta();
     if (!sheet.erpOptions) sheet.erpOptions = createDefaultErpOptions();
 
     await sheet.save();
 
-    res.json({ sheet, role });
+    const totalRows = await getSheetRowCount(req.params.id);
+    const rows = await getRowsForSheet(sheet._id, 0, Math.min(rowLimit, totalRows));
+    const sheetObject = sheet.toObject();
+    sheetObject.data = rows;
+
+    sendJson(req, res, {
+      sheet: sheetObject,
+      role,
+      rows: {
+        start: 0,
+        count: rows.length,
+        total: totalRows,
+      },
+    });
   } catch (error) {
     res.status(500).json({ message: "Failed to get sheet" });
+  }
+});
+
+app.get("/sheet/:id/rows", auth, async (req, res) => {
+  try {
+    const start = Math.max(0, Number.parseInt(req.query.start, 10) || 0);
+    const limit = Math.min(
+      Math.max(1, Number.parseInt(req.query.limit, 10) || DEFAULT_ROW_PAGE_SIZE),
+      MAX_ROW_PAGE_SIZE
+    );
+
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+
+    const totalRows = await getSheetRowCount(req.params.id);
+    const rows = await getRowsForSheet(sheet._id, start, Math.max(0, Math.min(limit, totalRows - start)));
+
+    sendJson(req, res, {
+      rows,
+      start,
+      count: rows.length,
+      total: totalRows,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to get sheet rows" });
+  }
+});
+
+app.get("/sheet/:id/search", auth, async (req, res) => {
+  try {
+    const query = String(req.query.q || "").trim().toLowerCase();
+    const limit = Math.min(Math.max(1, Number.parseInt(req.query.limit, 10) || 100), 500);
+
+    if (!query) {
+      return sendJson(req, res, { matches: [], total: 0 });
+    }
+
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+    await ensureSheetRowsSearchText(sheet._id);
+
+    const rowDocs = await SheetRow.find({
+      sheetId: sheet._id,
+      searchText: { $regex: escapeRegex(query), $options: "i" },
+    })
+      .sort({ rowIndex: 1 })
+      .limit(limit)
+      .lean();
+    const matches = [];
+
+    for (const row of rowDocs) {
+      for (let colIndex = 0; colIndex < DEFAULT_SHEET_COLS; colIndex += 1) {
+        const cell = row.cells?.[colIndex] || {};
+        const text = `${cell.value ?? ""} ${cell.formula || ""}`.toLowerCase();
+
+        if (text.includes(query)) {
+          matches.push({ rowIndex: row.rowIndex, colIndex });
+          if (matches.length >= limit) {
+            return sendJson(req, res, { matches, total: matches.length, truncated: true });
+          }
+        }
+      }
+    }
+
+    sendJson(req, res, { matches, total: matches.length, truncated: false });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to search sheet" });
+  }
+});
+
+app.get("/sheet/:id/export.csv", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+
+    const safeName = String(sheet.name || "sheet").replace(/[^\w.-]+/g, "_");
+    const cursor = SheetRow.find({ sheetId: sheet._id })
+      .sort({ rowIndex: 1 })
+      .lean()
+      .cursor();
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.csv"`);
+    res.write("\ufeff");
+    res.write(Array.from({ length: DEFAULT_SHEET_COLS }, (_, index) => escapeCsvCell(cellAddress(0, index).replace("1", ""))).join(",") + "\n");
+
+    for await (const row of cursor) {
+      const values = Array.from({ length: DEFAULT_SHEET_COLS }, (_, colIndex) => {
+        const cell = row.cells?.[colIndex] || {};
+        return escapeCsvCell(cell.formula || cell.value || "");
+      });
+      res.write(values.join(",") + "\n");
+    }
+
+    res.end();
+  } catch (error) {
+    res.status(500).json({ message: "Failed to export sheet" });
   }
 });
 
@@ -695,13 +1053,28 @@ app.put("/sheet/:id", auth, async (req, res) => {
       return res.status(403).json({ message: "You do not have edit permission" });
     }
 
-    sheet.data = req.body.data || sheet.data;
     sheet.meta = req.body.meta || sheet.meta || createDefaultMeta();
+
+    if (Array.isArray(req.body.data)) {
+      await SheetRow.deleteMany({ sheetId: sheet._id });
+      await SheetRow.insertMany(
+        req.body.data.map((row, rowIndex) => ({
+          sheetId: sheet._id,
+          rowIndex,
+          cells: normalizeRowCells(row),
+          searchText: buildRowSearchText(row),
+        }))
+      );
+      sheet.data = [];
+      sheet.markModified("data");
+    } else {
+      await migrateSheetRowsIfNeeded(sheet);
+    }
 
     sheet.analytics = {
       ...(sheet.analytics || {}),
       totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: countFormulaCells(sheet.data),
+      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
       totalMergedCells: sheet.meta?.merges?.length || 0,
       lastEditedBy: req.user.email,
       lastEditedAt: new Date(),
@@ -722,11 +1095,217 @@ app.put("/sheet/:id", auth, async (req, res) => {
       changeType: "import",
     });
 
-    io.to(req.params.id).emit("sheet-saved", sheet);
+    const sheetObject = sheet.toObject();
+    sheetObject.data = Array.isArray(req.body.data)
+      ? req.body.data.map((row) => normalizeRowCells(row))
+      : [];
 
-    res.json({ ok: true, sheet });
+    io.to(req.params.id).emit("sheet-saved", sheetObject);
+
+    res.json({ ok: true, sheet: sheetObject });
   } catch (error) {
     res.status(500).json({ message: "Failed to update sheet" });
+  }
+});
+
+app.post("/sheet/:id/rows", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    const count = Math.min(
+      Math.max(1, Number.parseInt(req.body.count, 10) || DEFAULT_SHEET_ROWS),
+      DEFAULT_SHEET_ROWS
+    );
+    await migrateSheetRowsIfNeeded(sheet);
+    const { rows, start, total } = await appendRowsToSheet(sheet._id, count);
+
+    sheet.analytics = {
+      ...(sheet.analytics || {}),
+      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+      totalMergedCells: sheet.meta?.merges?.length || 0,
+      lastEditedBy: req.user.email,
+      lastEditedAt: new Date(),
+    };
+
+    await sheet.save();
+
+    res.json({
+      rows,
+      start,
+      count,
+      total,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to add rows" });
+  }
+});
+
+app.post("/sheet/:id/import-rows", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    const start = Math.max(0, Number.parseInt(req.body.start, 10) || 0);
+    const rows = Array.isArray(req.body.rows) ? req.body.rows.slice(0, MAX_ROW_PAGE_SIZE) : [];
+
+    if (req.body.reset === true) {
+      await SheetRow.deleteMany({ sheetId: sheet._id });
+    }
+
+    if (rows.length > 0) {
+      await SheetRow.bulkWrite(
+        rows.map((row, offset) => ({
+          updateOne: {
+            filter: { sheetId: sheet._id, rowIndex: start + offset },
+            update: {
+              $set: {
+                sheetId: sheet._id,
+                rowIndex: start + offset,
+                cells: normalizeRowCells(row),
+                searchText: buildRowSearchText(row),
+              },
+            },
+            upsert: true,
+          },
+        }))
+      );
+    }
+
+    sheet.data = [];
+    sheet.markModified("data");
+    sheet.analytics = {
+      ...(sheet.analytics || {}),
+      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+      totalMergedCells: sheet.meta?.merges?.length || 0,
+      lastEditedBy: req.user.email,
+      lastEditedAt: new Date(),
+    };
+
+    await sheet.save();
+
+    res.json({
+      ok: true,
+      start,
+      count: rows.length,
+      total: await getSheetRowCount(sheet._id),
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to import rows" });
+  }
+});
+
+app.patch("/sheet/:id/cells", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    const { rowIndex, colIndex, value, formula, patches } = req.body;
+
+    if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+      return res.status(400).json({ message: "Invalid cell position" });
+    }
+
+    const normalizedPatches = await applyCellPatchesForUser({
+      sheet,
+      user: req.user,
+      rowIndex,
+      colIndex,
+      value,
+      formula,
+      patches,
+    });
+
+    io.to(req.params.id).emit("cell-change", {
+      rowIndex,
+      colIndex,
+      value,
+      formula,
+      patches: normalizedPatches,
+      updatedBy: req.user.email,
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update cell" });
+  }
+});
+
+app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    const { rowIndex, colIndex, style } = req.body;
+
+    if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+      return res.status(400).json({ message: "Invalid cell position" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+    const row = await ensureSheetRow(sheet._id, Number(rowIndex));
+    const cell = row.cells[Number(colIndex)] || createCell("");
+    const previousStyle = { ...(cell.style || {}) };
+
+    row.cells[Number(colIndex)] = {
+      value: cell.value ?? "",
+      formula: cell.formula || "",
+      style: {
+        ...defaultCellStyle,
+        ...previousStyle,
+        ...(style || {}),
+      },
+    };
+    row.searchText = buildRowSearchText(row.cells);
+    row.markModified("cells");
+    row.markModified("searchText");
+    await row.save();
+
+    await createChangeLog({
+      sheet,
+      user: req.user,
+      rowIndex: Number(rowIndex),
+      colIndex: Number(colIndex),
+      oldValue: previousStyle,
+      newValue: style,
+      changeType: "style",
+    });
+
+    sheet.analytics = {
+      ...(sheet.analytics || {}),
+      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
+      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+      totalMergedCells: sheet.meta?.merges?.length || 0,
+      lastEditedBy: req.user.email,
+      lastEditedAt: new Date(),
+    };
+
+    await sheet.save();
+
+    io.to(req.params.id).emit("cell-style-change", {
+      rowIndex,
+      colIndex,
+      style,
+      updatedBy: req.user.email,
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update cell style" });
   }
 });
 
@@ -835,6 +1414,7 @@ app.delete("/sheet/:id", auth, async (req, res) => {
     }
 
     await ChangeLog.deleteMany({ sheetId: sheet._id });
+    await SheetRow.deleteMany({ sheetId: sheet._id });
     await Sheet.deleteOne({ _id: sheet._id });
 
     io.to(req.params.id).emit("sheet-deleted", {
@@ -1063,39 +1643,15 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const normalizedPatches = Array.isArray(patches) && patches.length > 0
-        ? patches.slice(0, 50)
-        : [{ rowIndex, colIndex, value, formula }];
-      const numericRowIndex = Number(rowIndex);
-      const numericColIndex = Number(colIndex);
-
-      const oldCell = sheet.data?.[rowIndex]?.[colIndex] || "";
-      const oldValue =
-        oldCell && typeof oldCell === "object" ? oldCell.value : oldCell;
-
-      await createChangeLog({
+      const normalizedPatches = await applyCellPatchesForUser({
         sheet,
         user: socket.user,
-        rowIndex: numericRowIndex,
-        colIndex: numericColIndex,
-        oldValue,
-        newValue: formula || value,
-        changeType: formula || String(value).startsWith("=") ? "formula" : "value",
+        rowIndex,
+        colIndex,
+        value,
+        formula,
+        patches,
       });
-
-      normalizedPatches.forEach((patch) => applyCellPatch(sheet, patch));
-      sheet.markModified("data");
-
-      sheet.analytics = {
-        ...(sheet.analytics || {}),
-        totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-        totalFormulaCells: countFormulaCells(sheet.data),
-        totalMergedCells: sheet.meta?.merges?.length || 0,
-        lastEditedBy: socket.user.email,
-        lastEditedAt: new Date(),
-      };
-
-      await sheet.save();
 
       socket.to(sheetId).emit("cell-change", {
         rowIndex,
@@ -1135,14 +1691,21 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const cell = ensureCell(sheet, Number(rowIndex), Number(colIndex));
+      await migrateSheetRowsIfNeeded(sheet);
+      const row = await ensureSheetRow(sheet._id, Number(rowIndex));
+      const cell = row.cells[Number(colIndex)] || createCell("");
       const previousStyle = { ...(cell.style || {}) };
-      cell.style = {
-        ...defaultCellStyle,
-        ...previousStyle,
-        ...(style || {}),
+      row.cells[Number(colIndex)] = {
+        value: cell.value ?? "",
+        formula: cell.formula || "",
+        style: {
+          ...defaultCellStyle,
+          ...previousStyle,
+          ...(style || {}),
+        },
       };
-      sheet.markModified("data");
+      row.markModified("cells");
+      await row.save();
 
       await createChangeLog({
         sheet,
@@ -1157,7 +1720,7 @@ io.on("connection", (socket) => {
       sheet.analytics = {
         ...(sheet.analytics || {}),
         totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-        totalFormulaCells: countFormulaCells(sheet.data),
+        totalFormulaCells: await countFormulaCellsInRows(sheet._id),
         totalMergedCells: sheet.meta?.merges?.length || 0,
         lastEditedBy: socket.user.email,
         lastEditedAt: new Date(),
