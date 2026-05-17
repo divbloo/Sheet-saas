@@ -140,7 +140,6 @@ const DEFAULT_COLUMN_WIDTHS = {
   12: 92,
   13: 150,
   14: 92,
-  15: 92,
 };
 
 const DEFAULT_SHEET_ROWS = 500;
@@ -291,7 +290,7 @@ const createERPTemplateData = (type) => {
   const headers = headersByType[type] || headersByType["item-master"];
   const data = createEmptySheetData();
 
-  headers.forEach((header, index) => {
+  headers.slice(0, DEFAULT_SHEET_COLS).forEach((header, index) => {
     data[0][index] = {
       value: header,
       formula: "",
@@ -508,57 +507,82 @@ const appendRowsToSheet = async (sheetId, count) => {
 };
 
 const ensureSheetRow = async (sheetId, rowIndex) => {
-  let row = await SheetRow.findOne({ sheetId, rowIndex });
-
-  if (!row) {
-    row = await SheetRow.create({
-      sheetId,
-      rowIndex,
-      cells: normalizeRowCells([]),
-      searchText: "",
-    });
-  }
+  const row = await SheetRow.findOneAndUpdate(
+    { sheetId, rowIndex },
+    {
+      $setOnInsert: {
+        sheetId,
+        rowIndex,
+        cells: normalizeRowCells([]),
+        searchText: "",
+      },
+    },
+    { new: true, upsert: true }
+  );
 
   row.cells = normalizeRowCells(row.cells);
   return row;
 };
 
-const applyCellPatchToRows = async (sheetId, patch) => {
-  const rowIndex = Number(patch.rowIndex);
-  const colIndex = Number(patch.colIndex);
+const applyCellPatchesToRows = async (sheetId, patches) => {
+  const patchesByRow = new Map();
 
-  if (!isValidCellIndex(rowIndex) || !isValidCellIndex(colIndex)) {
-    return null;
+  patches.forEach((patch) => {
+    const rowIndex = Number(patch.rowIndex);
+    const colIndex = Number(patch.colIndex);
+
+    if (!isValidCellIndex(rowIndex) || !isValidCellIndex(colIndex)) {
+      return;
+    }
+
+    const rowPatches = patchesByRow.get(rowIndex) || [];
+    rowPatches.push({ ...patch, rowIndex, colIndex });
+    patchesByRow.set(rowIndex, rowPatches);
+  });
+
+  const updatedCells = [];
+
+  for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
+    const row = await ensureSheetRow(sheetId, rowIndex);
+
+    rowPatches.forEach((patch) => {
+      const currentCell = row.cells[patch.colIndex] || createCell("");
+
+      row.cells[patch.colIndex] = {
+        ...currentCell,
+        value: patch.value ?? "",
+        formula: patch.formula || "",
+        style: {
+          ...defaultCellStyle,
+          ...(currentCell.style || {}),
+          ...(patch.style || {}),
+        },
+      };
+
+      updatedCells.push({
+        rowIndex,
+        colIndex: patch.colIndex,
+        cell: row.cells[patch.colIndex],
+      });
+    });
+
+    row.searchText = buildRowSearchText(row.cells);
+    row.markModified("cells");
+    row.markModified("searchText");
+    await row.save();
   }
 
-  const row = await ensureSheetRow(sheetId, rowIndex);
-  const currentCell = row.cells[colIndex] || createCell("");
-
-  row.cells[colIndex] = {
-    ...currentCell,
-    value: patch.value ?? "",
-    formula: patch.formula || "",
-    style: {
-      ...defaultCellStyle,
-      ...(currentCell.style || {}),
-      ...(patch.style || {}),
-    },
-  };
-  row.searchText = buildRowSearchText(row.cells);
-
-  row.markModified("cells");
-  row.markModified("searchText");
-  await row.save();
-
-  return { rowIndex, colIndex, cell: row.cells[colIndex] };
+  return updatedCells;
 };
 
 const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value, formula, patches }) => {
   const normalizedPatches = Array.isArray(patches) && patches.length > 0
     ? patches.slice(0, 50)
     : [{ rowIndex, colIndex, value, formula }];
+  const primaryPatch = normalizedPatches[0] || { rowIndex, colIndex, value, formula };
   const numericRowIndex = Number(rowIndex);
   const numericColIndex = Number(colIndex);
+  const newValue = primaryPatch.formula || primaryPatch.value || "";
 
   await migrateSheetRowsIfNeeded(sheet);
 
@@ -573,13 +597,11 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
     rowIndex: numericRowIndex,
     colIndex: numericColIndex,
     oldValue,
-    newValue: formula || value,
-    changeType: formula || String(value).startsWith("=") ? "formula" : "value",
+    newValue,
+    changeType: primaryPatch.formula || String(primaryPatch.value || "").startsWith("=") ? "formula" : "value",
   });
 
-  await Promise.all(
-    normalizedPatches.map((patch) => applyCellPatchToRows(sheet._id, patch))
-  );
+  await applyCellPatchesToRows(sheet._id, normalizedPatches);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
@@ -1213,23 +1235,27 @@ app.patch("/sheet/:id/cells", auth, async (req, res) => {
 
     const { rowIndex, colIndex, value, formula, patches } = req.body;
 
-    if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+    const firstPatch = Array.isArray(patches) ? patches[0] : null;
+    const targetRowIndex = rowIndex ?? firstPatch?.rowIndex;
+    const targetColIndex = colIndex ?? firstPatch?.colIndex;
+
+    if (!isValidCellIndex(Number(targetRowIndex)) || !isValidCellIndex(Number(targetColIndex))) {
       return res.status(400).json({ message: "Invalid cell position" });
     }
 
     const normalizedPatches = await applyCellPatchesForUser({
       sheet,
       user: req.user,
-      rowIndex,
-      colIndex,
+      rowIndex: targetRowIndex,
+      colIndex: targetColIndex,
       value,
       formula,
       patches,
     });
 
     io.to(req.params.id).emit("cell-change", {
-      rowIndex,
-      colIndex,
+      rowIndex: targetRowIndex,
+      colIndex: targetColIndex,
       value,
       formula,
       patches: normalizedPatches,
@@ -1238,6 +1264,7 @@ app.patch("/sheet/:id/cells", auth, async (req, res) => {
 
     res.json({ ok: true });
   } catch (error) {
+    console.error("Failed to update cell", error);
     res.status(500).json({ message: "Failed to update cell" });
   }
 });
@@ -1637,7 +1664,11 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+      const firstPatch = Array.isArray(patches) ? patches[0] : null;
+      const targetRowIndex = rowIndex ?? firstPatch?.rowIndex;
+      const targetColIndex = colIndex ?? firstPatch?.colIndex;
+
+      if (!isValidCellIndex(Number(targetRowIndex)) || !isValidCellIndex(Number(targetColIndex))) {
         socket.emit("socket-error", "Invalid cell position");
         if (typeof ack === "function") ack({ ok: false, message: "Invalid cell position" });
         return;
@@ -1646,16 +1677,16 @@ io.on("connection", (socket) => {
       const normalizedPatches = await applyCellPatchesForUser({
         sheet,
         user: socket.user,
-        rowIndex,
-        colIndex,
+        rowIndex: targetRowIndex,
+        colIndex: targetColIndex,
         value,
         formula,
         patches,
       });
 
       socket.to(sheetId).emit("cell-change", {
-        rowIndex,
-        colIndex,
+        rowIndex: targetRowIndex,
+        colIndex: targetColIndex,
         value,
         formula,
         patches: normalizedPatches,
@@ -1664,6 +1695,7 @@ io.on("connection", (socket) => {
 
       if (typeof ack === "function") ack({ ok: true });
     } catch (error) {
+      console.error("Failed to update cell", error);
       socket.emit("socket-error", "Failed to update cell");
       if (typeof ack === "function") ack({ ok: false, message: "Failed to update cell" });
     }

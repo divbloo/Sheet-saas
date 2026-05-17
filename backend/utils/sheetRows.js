@@ -1,4 +1,4 @@
-const DEFAULT_SHEET_COLS = 16;
+const DEFAULT_SHEET_COLS = 15;
 
 const defaultCellStyle = {
   fontWeight: "normal",

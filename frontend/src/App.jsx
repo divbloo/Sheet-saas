@@ -3,7 +3,9 @@ import { io } from "socket.io-client";
 import defaultErpOptions from "./defaultErpOptions.json";
 import "./App.css";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? "http://localhost:5000" : window.location.origin);
 
 const defaultCellStyle = {
   fontWeight: "normal",
@@ -38,7 +40,6 @@ const DEFAULT_COLUMN_WIDTHS = {
   12: 92,
   13: 150,
   14: 92,
-  15: 92,
 };
 const AUTO_COLUMN_LIMITS = {
   0: { min: 170, max: 300 },
@@ -56,7 +57,6 @@ const AUTO_COLUMN_LIMITS = {
   12: { min: 72, max: 110 },
   13: { min: 90, max: 170 },
   14: { min: 72, max: 110 },
-  15: { min: 72, max: 110 },
 };
 
 const defaultMeta = {
@@ -96,7 +96,7 @@ const erpArabicHeaders = [
   "التأكيد الثالث",
 ];
 
-const COLS = 16;
+const COLS = 15;
 const MIN_SHEET_ROWS = 500;
 const ADD_ROWS_STEP = 500;
 const IMPORT_BATCH_SIZE = 500;
@@ -161,6 +161,7 @@ function App() {
   const [optionText, setOptionText] = useState("");
   const [optionTarget, setOptionTarget] = useState("mainGroups");
   const [optionParent, setOptionParent] = useState("");
+  const [supportSourceParent, setSupportSourceParent] = useState("");
 
   const socketRef = useRef(null);
   const selectedSheetRef = useRef(null);
@@ -179,6 +180,30 @@ function App() {
         ? "Connecting..."
         : "Offline"
   );
+
+  const getOptionParentSuggestions = (target = optionTarget) => {
+    if (target === "subGroups") return Array.from(new Set(erpOptions.mainGroups || []));
+    if (target === "subSubGroups") {
+      return Array.from(new Set(Object.values(erpOptions.subGroups || {}).flat()));
+    }
+    if (target === "supportGroups") {
+      return Array.from(new Set(Object.values(erpOptions.subGroups || {}).flat()));
+    }
+    if (target === "detailedGroups") {
+      return Array.from(new Set(Object.values(erpOptions.supportGroups || {}).flat()));
+    }
+
+    return [];
+  };
+
+  const getSupportGroupOptions = (subGroup) => {
+    if (!subGroup) return [];
+
+    const directOptions = erpOptions.supportGroups?.[subGroup];
+    if (Array.isArray(directOptions)) return directOptions;
+
+    return defaultErpOptions.supportGroups?.[subGroup] || [];
+  };
 
   const normalizeCell = (cell) => {
     if (typeof cell === "object" && cell !== null && "value" in cell) {
@@ -676,7 +701,6 @@ function App() {
       "sequence",
       "confirmation1",
       "confirmation2",
-      "confirmation3",
     ];
 
     if (independentKeys.includes(optionTarget)) {
@@ -698,6 +722,37 @@ function App() {
     }
 
     setOptionText("");
+    await saveErpOptions(newOptions);
+  };
+
+  const copySupportOptionsToSubGroup = async () => {
+    const targetSubGroup = optionParent.trim();
+    const sourceParent = supportSourceParent.trim();
+
+    if (!targetSubGroup || !sourceParent) {
+      showMessage("Select sub group and source list first");
+      return;
+    }
+
+    const sourceOptions = erpOptions.supportGroups?.[sourceParent] || [];
+
+    if (!sourceOptions.length) {
+      showMessage("Source list has no options");
+      return;
+    }
+
+    const newOptions = {
+      ...erpOptions,
+      supportGroups: {
+        ...(erpOptions.supportGroups || {}),
+        [targetSubGroup]: Array.from(new Set([
+          ...(erpOptions.supportGroups?.[targetSubGroup] || []),
+          ...sourceOptions,
+        ])),
+      },
+    };
+
+    setSupportSourceParent("");
     await saveErpOptions(newOptions);
   };
 
@@ -771,21 +826,21 @@ function App() {
 
     const mainGroup = normalizeCell(row[2]).value;
     const subGroup = normalizeCell(row[3]).value;
-    const subSubGroup = normalizeCell(row[4]).value;
     const supportGroup = normalizeCell(row[5]).value;
 
     if (colIndex === 2) return erpOptions.mainGroups || [];
-    if (colIndex === 3) return erpOptions.subGroups?.[mainGroup] || [];
-    if (colIndex === 4) return erpOptions.subSubGroups?.[subGroup] || [];
-    if (colIndex === 5) return erpOptions.supportGroups?.[subSubGroup] || [];
-    if (colIndex === 6) return erpOptions.detailedGroups?.[supportGroup] || [];
+    if (colIndex === 3) return erpOptions.subGroups?.[mainGroup] || defaultErpOptions.subGroups?.[mainGroup] || [];
+    if (colIndex === 4) return erpOptions.subSubGroups?.[subGroup] || defaultErpOptions.subSubGroups?.[subGroup] || [];
+    if (colIndex === 5) return getSupportGroupOptions(subGroup);
+    if (colIndex === 6) {
+      return erpOptions.detailedGroups?.[supportGroup] || defaultErpOptions.detailedGroups?.[supportGroup] || [];
+    }
     if (colIndex === 7) return erpOptions.units || [];
     if (colIndex === 8) return erpOptions.packages || [];
     if (colIndex === 9) return erpOptions.shelfLife || [];
     if (colIndex === 10) return erpOptions.sequence || [];
     if (colIndex === 12) return erpOptions.confirmation1 || [];
     if (colIndex === 14) return erpOptions.confirmation2 || [];
-    if (colIndex === 15) return erpOptions.confirmation3 || [];
 
     return null;
   };
@@ -1487,7 +1542,7 @@ function App() {
     return { jsPDF, autoTable };
   };
 
-  const exportExcel = async () => {
+  const exportCSV = async () => {
     if (!selectedSheet) return;
     const res = await authFetch(API_URL + "/sheet/" + selectedSheet._id + "/export.csv");
 
@@ -1503,6 +1558,43 @@ function App() {
     link.download = (selectedSheet.name || "sheet") + ".csv";
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  const exportExcel = async () => {
+    if (!selectedSheet) return;
+
+    const XLSX = await loadExcelTools();
+    const allRows = await loadAllRowsForExport();
+    const exportRows = allRows.length > 0 ? allRows : selectedSheet.data;
+    const rows = exportRows.map((row) =>
+      row.slice(0, COLS).map((cell) => {
+        const normalized = normalizeCell(cell);
+        return normalized.formula || normalized.value || "";
+      })
+    );
+    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+
+    exportRows.forEach((row, rowIndex) => {
+      row.slice(0, COLS).forEach((cell, colIndex) => {
+        const normalized = normalizeCell(cell);
+        if (!normalized.formula) return;
+
+        const address = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+        worksheet[address] = {
+          ...(worksheet[address] || {}),
+          f: normalized.formula.replace(/^=/, ""),
+          v: normalized.value || undefined,
+        };
+      });
+    });
+
+    worksheet["!cols"] = Array.from({ length: COLS }, (_, colIndex) => ({
+      wch: Math.max(8, Math.round(getColumnWidth(colIndex) / 7)),
+    }));
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
+    XLSX.writeFile(workbook, (selectedSheet.name || "sheet") + ".xlsx");
   };
 
   const exportPDF = async () => {
@@ -2307,7 +2399,8 @@ function App() {
               <h4>File & History</h4>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={uploadExcel} hidden />
               <button onClick={() => fileInputRef.current.click()}>Upload Excel</button>
-              <button onClick={exportExcel}>Export CSV</button>
+              <button onClick={exportCSV}>Export CSV</button>
+              <button onClick={exportExcel}>Export Excel</button>
               <button onClick={exportPDF}>Export PDF</button>
               <button onClick={saveVersion}>Save Version</button>
               <button onClick={showAllChanges}>Show All Changes</button>
@@ -2622,7 +2715,13 @@ function App() {
             <h3>ERP Options Manager</h3>
 
             <label>Option Type</label>
-            <select value={optionTarget} onChange={(e) => setOptionTarget(e.target.value)}>
+            <select
+              value={optionTarget}
+              onChange={(e) => {
+                setOptionTarget(e.target.value);
+                setOptionParent("");
+              }}
+            >
               <option value="mainGroups">Main Groups</option>
               <option value="subGroups">Sub Groups</option>
               <option value="subSubGroups">Sub Sub Groups</option>
@@ -2634,17 +2733,42 @@ function App() {
               <option value="sequence">Sequence</option>
               <option value="confirmation1">First Confirmation</option>
               <option value="confirmation2">Second Confirmation</option>
-              <option value="confirmation3">Third Confirmation</option>
             </select>
 
             {["subGroups", "subSubGroups", "supportGroups", "detailedGroups"].includes(optionTarget) && (
               <>
                 <label>Parent Value</label>
                 <input
-                  placeholder="Parent option name exactly"
+                  list="erp-parent-options"
+                  placeholder={
+                    optionTarget === "supportGroups"
+                      ? "Sub Group"
+                      : "Parent option name exactly"
+                  }
                   value={optionParent}
                   onChange={(e) => setOptionParent(e.target.value)}
                 />
+                <datalist id="erp-parent-options">
+                  {getOptionParentSuggestions().map((parent) => (
+                    <option key={parent} value={parent} />
+                  ))}
+                </datalist>
+              </>
+            )}
+
+            {optionTarget === "supportGroups" && (
+              <>
+                <label>Copy Existing List</label>
+                <select
+                  value={supportSourceParent}
+                  onChange={(e) => setSupportSourceParent(e.target.value)}
+                >
+                  <option value="">Select source list</option>
+                  {Object.keys(erpOptions.supportGroups || {}).map((parent) => (
+                    <option key={parent} value={parent}>{parent}</option>
+                  ))}
+                </select>
+                <button onClick={copySupportOptionsToSubGroup}>Copy To Sub Group</button>
               </>
             )}
 
