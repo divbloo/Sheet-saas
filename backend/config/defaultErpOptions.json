@@ -807,10 +807,6 @@
     "Litter",
     "Pail"
   ],
-  "packages": [
-    "yes",
-    "no"
-  ],
   "shelfLife": [
     "yes",
     "no"

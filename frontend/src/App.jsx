@@ -35,11 +35,10 @@ const DEFAULT_COLUMN_WIDTHS = {
   7: 82,
   8: 64,
   9: 64,
-  10: 64,
-  11: 220,
-  12: 92,
-  13: 150,
-  14: 92,
+  10: 220,
+  11: 92,
+  12: 150,
+  13: 92,
 };
 const AUTO_COLUMN_LIMITS = {
   0: { min: 170, max: 300 },
@@ -52,11 +51,10 @@ const AUTO_COLUMN_LIMITS = {
   7: { min: 64, max: 110 },
   8: { min: 54, max: 76 },
   9: { min: 54, max: 76 },
-  10: { min: 54, max: 76 },
-  11: { min: 110, max: 165 },
-  12: { min: 72, max: 110 },
-  13: { min: 90, max: 170 },
-  14: { min: 72, max: 110 },
+  10: { min: 110, max: 165 },
+  11: { min: 72, max: 110 },
+  12: { min: 90, max: 170 },
+  13: { min: 72, max: 110 },
 };
 
 const defaultMeta = {
@@ -86,7 +84,6 @@ const erpArabicHeaders = [
   "المجموعة المساعدة",
   "المجموعة التفصيلية",
   "وحدة القياس",
-  "العبوة",
   "الصلاحية",
   "التسلسل",
   "ملاحظات",
@@ -96,7 +93,8 @@ const erpArabicHeaders = [
   "التأكيد الثالث",
 ];
 
-const COLS = 15;
+const COLS = 14;
+const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 const MIN_SHEET_ROWS = 500;
 const ADD_ROWS_STEP = 500;
 const IMPORT_BATCH_SIZE = 500;
@@ -233,8 +231,13 @@ function App() {
   const normalizeData = (data = [], minRows = MIN_SHEET_ROWS) => {
     return Array.from({ length: Math.max(minRows, data.length) }, (_, r) => {
       const row = data[r] || [];
+      const sourceRow =
+        row.length > COLS
+          ? row.filter((_, index) => index !== LEGACY_PACKAGE_COLUMN_INDEX)
+          : row;
+
       return Array.from({ length: COLS }, (_, c) =>
-        normalizeCell(row[c] || "")
+        normalizeCell(sourceRow[c] || "")
       );
     });
   };
@@ -696,7 +699,6 @@ function App() {
     const independentKeys = [
       "mainGroups",
       "units",
-      "packages",
       "shelfLife",
       "sequence",
       "confirmation1",
@@ -836,11 +838,10 @@ function App() {
       return erpOptions.detailedGroups?.[supportGroup] || defaultErpOptions.detailedGroups?.[supportGroup] || [];
     }
     if (colIndex === 7) return erpOptions.units || [];
-    if (colIndex === 8) return erpOptions.packages || [];
-    if (colIndex === 9) return erpOptions.shelfLife || [];
-    if (colIndex === 10) return erpOptions.sequence || [];
-    if (colIndex === 12) return erpOptions.confirmation1 || [];
-    if (colIndex === 14) return erpOptions.confirmation2 || [];
+    if (colIndex === 8) return erpOptions.shelfLife || [];
+    if (colIndex === 9) return erpOptions.sequence || [];
+    if (colIndex === 11) return erpOptions.confirmation1 || [];
+    if (colIndex === 13) return erpOptions.confirmation2 || [];
 
     return null;
   };
@@ -1605,7 +1606,7 @@ function App() {
     const allRows = await loadAllRowsForExport();
     const exportRows = allRows.length > 0 ? allRows : selectedSheet.data;
     const rows = exportRows.map((row) =>
-      row.slice(0, 16).map((cell) => normalizeCell(cell).value)
+      row.slice(0, COLS).map((cell) => normalizeCell(cell).value)
     );
 
     autoTable(doc, {
@@ -2537,7 +2538,7 @@ function App() {
                       const isSelected =
                         selectedCell?.rowIndex === rowIndex && selectedCell?.colIndex === colIndex;
                       const isInSelectedRange = isCellInSelectedRange(rowIndex, colIndex);
-                      const isCodeColumn = colIndex === 13;
+                      const isCodeColumn = colIndex === 12;
 
                       const dropdownOptions = getDropdownOptions(rowIndex, colIndex);
 
@@ -2728,7 +2729,6 @@ function App() {
               <option value="supportGroups">Support Groups</option>
               <option value="detailedGroups">Detailed Groups</option>
               <option value="units">Unit of Measure</option>
-              <option value="packages">Package Type</option>
               <option value="shelfLife">Shelf Life</option>
               <option value="sequence">Sequence</option>
               <option value="confirmation1">First Confirmation</option>

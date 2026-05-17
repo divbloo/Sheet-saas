@@ -1,4 +1,5 @@
-const DEFAULT_SHEET_COLS = 15;
+const DEFAULT_SHEET_COLS = 14;
+const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 
 const defaultCellStyle = {
   fontWeight: "normal",
@@ -18,8 +19,13 @@ const createCell = (value = "") => ({
 });
 
 const normalizeRowCells = (cells = []) => {
+  const sourceCells =
+    cells.length > DEFAULT_SHEET_COLS
+      ? cells.filter((_, index) => index !== LEGACY_PACKAGE_COLUMN_INDEX)
+      : cells;
+
   return Array.from({ length: DEFAULT_SHEET_COLS }, (_, colIndex) => {
-    const cell = cells[colIndex];
+    const cell = sourceCells[colIndex];
 
     if (cell && typeof cell === "object") {
       return {
