@@ -17,9 +17,19 @@ const createCorsOptions = (allowedOrigins) => ({
   },
 });
 
-const createHelmetOptions = () => ({
-  contentSecurityPolicy: process.env.NODE_ENV === "production" ? undefined : false,
-});
+const createHelmetOptions = () => {
+  if (process.env.NODE_ENV !== "production") {
+    return { contentSecurityPolicy: false };
+  }
+
+  return {
+    contentSecurityPolicy: {
+      directives: {
+        upgradeInsecureRequests: process.env.FORCE_HTTPS === "true" ? [] : null,
+      },
+    },
+  };
+};
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
