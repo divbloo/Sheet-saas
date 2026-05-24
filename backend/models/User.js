@@ -13,6 +13,21 @@ const UserSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    username: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+    },
+    role: {
+      type: String,
+      enum: ["user", "admin"],
+      default: "user",
+    },
+    avatarUrl: {
+      type: String,
+      default: "",
+    },
   },
   { timestamps: true }
 );

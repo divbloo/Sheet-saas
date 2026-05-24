@@ -70,10 +70,11 @@ const SheetSchema = new mongoose.Schema(
         },
 
         email: String,
+        username: String,
 
         role: {
           type: String,
-          enum: ["owner", "editor", "viewer"],
+          enum: ["owner", "admin", "editor", "viewer"],
           default: "viewer",
         },
       },

@@ -39,6 +39,7 @@ const DEFAULT_COLUMN_WIDTHS = {
   11: 92,
   12: 150,
   13: 92,
+  14: 220,
 };
 const AUTO_COLUMN_LIMITS = {
   0: { min: 170, max: 300 },
@@ -55,6 +56,7 @@ const AUTO_COLUMN_LIMITS = {
   11: { min: 72, max: 110 },
   12: { min: 90, max: 170 },
   13: { min: 72, max: 110 },
+  14: { min: 150, max: 260 },
 };
 
 const defaultMeta = {
@@ -93,7 +95,25 @@ const erpArabicHeaders = [
   "التأكيد الثالث",
 ];
 
-const COLS = 14;
+const visibleErpHeaders = [
+  "اسم الصنف",
+  "الوصف",
+  "المجموعة الرئيسية",
+  "المجموعة الفرعية",
+  "المجموعة تحت الفرعية",
+  "المجموعة المساعدة",
+  "المجموعة التفصيلية",
+  "وحدة القياس",
+  "الصلاحية",
+  "التسلسل",
+  "ملاحظات",
+  "التأكيد الأول",
+  "الكود",
+  "التأكيد الثاني",
+  "Modified Description",
+];
+
+const COLS = 15;
 const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 const MIN_SHEET_ROWS = 500;
 const ADD_ROWS_STEP = 500;
@@ -112,9 +132,13 @@ function App() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [username, setUsername] = useState("");
   const [authFormKey, setAuthFormKey] = useState(0);
   const [token, setToken] = useState(sessionStorage.getItem("token") || "");
   const [currentUser, setCurrentUser] = useState(null);
+  const [currentPage, setCurrentPage] = useState("sheet");
+  const [profileForm, setProfileForm] = useState({ username: "", email: "", avatarUrl: "" });
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: "", newPassword: "" });
 
   const [sheets, setSheets] = useState([]);
   const [sheetSearch, setSheetSearch] = useState("");
@@ -169,8 +193,10 @@ function App() {
   const fileInputRef = useRef(null);
   const contextMenuRef = useRef(null);
 
-  const canEdit = role === "owner" || role === "editor";
+  const canEdit = role === "owner" || role === "admin" || role === "editor";
   const canManage = role === "owner";
+  const canManageSheetUsers = role === "owner" || role === "admin";
+  const canGrantSheetAdmin = role === "owner";
   const statusText = savingStatus || (
     connectionStatus === "online"
       ? "Online"
@@ -263,7 +289,7 @@ function App() {
   };
 
   const colName = (index) => {
-    return erpArabicHeaders[index] || `Column ${index + 1}`;
+    return visibleErpHeaders[index] || erpArabicHeaders[index] || `Column ${index + 1}`;
   };
 
   const estimateTextWidth = (text) => {
@@ -497,7 +523,7 @@ function App() {
       const res = await fetch(API_URL + "/" + mode, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, username }),
       });
 
       const data = await res.json();
@@ -512,6 +538,11 @@ function App() {
         setToken(data.token);
         setConnectionStatus("connecting");
         setCurrentUser(data.user || null);
+        setProfileForm({
+          username: data.user?.username || "",
+          email: data.user?.email || "",
+          avatarUrl: data.user?.avatarUrl || "",
+        });
       }
 
       if (mode === "signup") setMode("login");
@@ -523,7 +554,80 @@ function App() {
   const loadMe = async () => {
     const res = await authFetch(API_URL + "/me");
     const data = await res.json();
-    if (res.ok) setCurrentUser(data.user);
+    if (res.ok) {
+      setCurrentUser(data.user);
+      setProfileForm({
+        username: data.user?.username || "",
+        email: data.user?.email || "",
+        avatarUrl: data.user?.avatarUrl || "",
+      });
+    }
+  };
+
+  const saveProfile = async () => {
+    const res = await authFetch(API_URL + "/me", {
+      method: "PATCH",
+      body: JSON.stringify(profileForm),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showMessage(data.message || "Failed to update profile");
+      return;
+    }
+
+    if (data.token) {
+      sessionStorage.setItem("token", data.token);
+      setToken(data.token);
+    }
+
+    setCurrentUser(data.user);
+    setProfileForm({
+      username: data.user?.username || "",
+      email: data.user?.email || "",
+      avatarUrl: data.user?.avatarUrl || "",
+    });
+    await Promise.all([loadSheets(), loadWorkspaces()]);
+    showMessage("Profile updated");
+  };
+
+  const updateProfileImage = (file) => {
+    if (!file) return;
+
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      showMessage("Use PNG, JPG, or WEBP image");
+      return;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      showMessage("Profile image must be under 2 MB");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setProfileForm((form) => ({
+        ...form,
+        avatarUrl: String(reader.result || ""),
+      }));
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const changePassword = async () => {
+    const res = await authFetch(API_URL + "/me/password", {
+      method: "PATCH",
+      body: JSON.stringify(passwordForm),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showMessage(data.message || "Failed to change password");
+      return;
+    }
+
+    setPasswordForm({ currentPassword: "", newPassword: "" });
+    showMessage("Password changed");
   };
 
   const loadWorkspaces = async () => {
@@ -655,6 +759,7 @@ function App() {
     setSheetRowTotal(0);
     setGridScrollTop(0);
     setVisibleRows(INITIAL_VISIBLE_ROWS);
+    setCurrentPage("sheet");
     setMenuOpen(false);
 
     await loadErpOptions(id);
@@ -1457,7 +1562,20 @@ function App() {
   const copySelection = async () => {
     if (!selectedCell || !selectedSheet) return;
     const cell = normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]);
-    await navigator.clipboard.writeText(cell.formula || cell.value || "");
+    const text = cell.formula || cell.value || "";
+
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const helper = document.createElement("textarea");
+      helper.value = text;
+      helper.style.position = "fixed";
+      helper.style.opacity = "0";
+      document.body.appendChild(helper);
+      helper.select();
+      document.execCommand("copy");
+      document.body.removeChild(helper);
+    }
   };
 
   const pasteToCell = async () => {
@@ -1630,7 +1748,7 @@ function App() {
 
     if (maxCols > COLS) {
       const ok = window.confirm(
-        "This file has more than 16 columns. Extra columns will be ignored. Continue?"
+        `This file has more than ${COLS} columns. Extra columns will be ignored. Continue?`
       );
 
       if (!ok) {
@@ -1753,11 +1871,11 @@ function App() {
   };
 
   const shareSheet = async () => {
-    if (!selectedSheet || !canManage) return;
+    if (!selectedSheet || !canManageSheetUsers) return;
 
     const res = await authFetch(API_URL + "/sheet/" + selectedSheet._id + "/share", {
       method: "POST",
-      body: JSON.stringify({ email: shareEmail, role: shareRole }),
+      body: JSON.stringify({ identifier: shareEmail, role: shareRole }),
     });
 
     const data = await res.json();
@@ -1771,8 +1889,26 @@ function App() {
     setShareEmail("");
   };
 
+  const updateCollaboratorRole = async (user, nextRole) => {
+    if (!selectedSheet || !canManageSheetUsers) return;
+
+    const res = await authFetch(API_URL + "/sheet/" + selectedSheet._id + "/share", {
+      method: "POST",
+      body: JSON.stringify({ identifier: user.username || user.email, role: nextRole }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      showMessage(data.message || "Failed to update role");
+      return;
+    }
+
+    mergeSheetMetadata(data.sheet);
+    showMessage("User role updated");
+  };
+
   const removeCollaborator = async (userId) => {
-    if (!selectedSheet || !canManage) return;
+    if (!selectedSheet || !canManageSheetUsers) return;
 
     const res = await authFetch(
       API_URL + "/sheet/" + selectedSheet._id + "/collaborator/" + userId,
@@ -1790,10 +1926,10 @@ function App() {
   };
 
   const stopAllSharing = async () => {
-    if (!selectedSheet || !canManage) return;
+    if (!selectedSheet || !canManageSheetUsers) return;
 
     const collaborators = (selectedSheet.collaborators || []).filter(
-      (user) => user.role !== "owner"
+      (user) => user.role !== "owner" && (canGrantSheetAdmin || user.role !== "admin")
     );
 
     if (collaborators.length === 0) {
@@ -1830,6 +1966,10 @@ function App() {
     setConnectionStatus("offline");
     setEmail("");
     setPassword("");
+    setUsername("");
+    setCurrentPage("sheet");
+    setProfileForm({ username: "", email: "", avatarUrl: "" });
+    setPasswordForm({ currentPassword: "", newPassword: "" });
     setAuthFormKey((key) => key + 1);
     setSheets([]);
     setSelectedSheet(null);
@@ -1860,6 +2000,9 @@ function App() {
   const isBold = selectedCellStyle.fontWeight === "bold";
   const isItalic = selectedCellStyle.fontStyle === "italic";
   const isUnderline = selectedCellStyle.textDecoration === "underline";
+  const canChangeSheetUserRole = (user) => {
+    return user.role !== "owner" && (canGrantSheetAdmin || user.role !== "admin");
+  };
   const visibleCellSearchIndex =
     cellSearchIndex >= 0 && cellSearchIndex < cellSearchMatches.length ? cellSearchIndex : -1;
   const virtualRowStart = Math.max(
@@ -2054,23 +2197,31 @@ function App() {
   });
 
   useEffect(() => {
+    const isShortcut = (event, code) => {
+      return (event.ctrlKey || event.metaKey) && event.code === code;
+    };
+
+    const isTypingTarget = (target) => {
+      return ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName);
+    };
+
     const handler = (e) => {
-      if (e.ctrlKey && e.key.toLowerCase() === "s") {
+      if (isShortcut(e, "KeyS")) {
         e.preventDefault();
         saveSheet(false);
       }
-      if (e.ctrlKey && e.key.toLowerCase() === "c") {
+      if (isShortcut(e, "KeyC") && !isTypingTarget(e.target)) {
         e.preventDefault();
         copySelection();
       }
-      if (e.ctrlKey && e.key.toLowerCase() === "v") {
+      if (isShortcut(e, "KeyV") && !isTypingTarget(e.target)) {
         e.preventDefault();
         pasteToCell();
       }
-      if (e.key === "Delete" && selectedCell) {
+      if (e.key === "Delete" && selectedCell && !isTypingTarget(e.target)) {
         updateCell(selectedCell.rowIndex, selectedCell.colIndex, "");
       }
-      if (e.ctrlKey && e.key.toLowerCase() === "b") {
+      if (isShortcut(e, "KeyB")) {
         e.preventDefault();
         updateCellStyle("fontWeight", "bold");
       }
@@ -2083,9 +2234,56 @@ function App() {
   if (!token) {
     return (
       <div className="auth-page">
-        <div className="auth-card" key={authFormKey}>
+        <section className="auth-showcase">
+          <div className="brand-mark">SS</div>
           <h1>Sheet SaaS</h1>
-          <p>ERP mini sheets with collaboration.</p>
+          <p>Collaborative ERP item sheets with controlled dropdowns, live edits, and clean exports.</p>
+          <div className="auth-preview" aria-hidden="true">
+            <div className="preview-toolbar">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="preview-grid">
+              <strong>Item Name</strong>
+              <strong>Main Group</strong>
+              <strong>Unit</strong>
+              <span>Pump Set</span>
+              <span>Pumps</span>
+              <span>PCS</span>
+              <span>Pipe Work</span>
+              <span>Fittings</span>
+              <span>m</span>
+              <span>Tank Base</span>
+              <span>Metal works</span>
+              <span>m2</span>
+            </div>
+          </div>
+          <div className="auth-stats">
+            <span>Realtime</span>
+            <span>ERP Ready</span>
+            <span>Secure Login</span>
+          </div>
+        </section>
+
+        <div className="auth-card" key={authFormKey}>
+          <div className="auth-card-heading">
+            <span>{mode === "login" ? "Welcome back" : "Create workspace"}</span>
+            <h2>{mode === "login" ? "Login to continue" : "Start with your account"}</h2>
+            <p>{mode === "login" ? "Use your email and password to open your sheets." : "Add your username, email, and password."}</p>
+          </div>
+
+          {mode === "signup" && (
+            <>
+              <label>Username</label>
+              <input
+                autoComplete="off"
+                name={`username-${authFormKey}`}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </>
+          )}
 
           <label>Email</label>
           <input
@@ -2284,7 +2482,30 @@ function App() {
           <button className="close-menu" onClick={() => setMenuOpen(false)}>×</button>
 
           <h3>Menu</h3>
-          <p>{currentUser?.email}</p>
+          <div className="drawer-profile">
+            <div className="profile-avatar small">
+              {currentUser?.avatarUrl ? (
+                <img src={currentUser.avatarUrl} alt="" />
+              ) : (
+                <span>{(currentUser?.username || currentUser?.email || "U").charAt(0).toUpperCase()}</span>
+              )}
+            </div>
+            <p>{currentUser?.username || currentUser?.email}</p>
+          </div>
+
+          <div className="drawer-section">
+            <button onClick={() => { setCurrentPage("sheet"); setMenuOpen(false); }}>
+              Sheets
+            </button>
+            <button onClick={() => { setCurrentPage("profile"); setMenuOpen(false); }}>
+              Profile
+            </button>
+            {currentUser?.role === "admin" && (
+              <button onClick={() => { setCurrentPage("admin"); setMenuOpen(false); }}>
+                Admin
+              </button>
+            )}
+          </div>
 
           <div className="drawer-section">
             <h4>Admin Analytics</h4>
@@ -2348,18 +2569,22 @@ function App() {
             ))}
           </div>
 
-          {selectedSheet && canManage && (
+          {selectedSheet && canManageSheetUsers && (
             <div className="drawer-section">
-              <h4>Owner Controls</h4>
-              <button className="danger-btn" onClick={() => setDeleteConfirmOpen(true)}>
-                Delete Sheet
-              </button>
-              <button onClick={() => setErpOptionsOpen(true)}>
-                ERP Options Manager
-              </button>
+              <h4>{canManage ? "Owner Controls" : "Admin Controls"}</h4>
+              {canManage && (
+                <>
+                  <button className="danger-btn" onClick={() => setDeleteConfirmOpen(true)}>
+                    Delete Sheet
+                  </button>
+                  <button onClick={() => setErpOptionsOpen(true)}>
+                    ERP Options Manager
+                  </button>
+                </>
+              )}
 
               <h4>Sheet Users</h4>
-              {selectedSheet.collaborators?.some((user) => user.role !== "owner") && (
+              {selectedSheet.collaborators?.some((user) => canChangeSheetUserRole(user)) && (
                 <button className="danger-btn" onClick={stopAllSharing}>
                   Stop All Sharing
                 </button>
@@ -2367,10 +2592,22 @@ function App() {
               {selectedSheet.collaborators?.map((user) => (
                 <div className="user-row" key={user.userId}>
                   <div>
-                    <span>{user.email}</span>
-                    <small>{user.role}</small>
+                    <span>{user.username || user.email}</span>
+                    {user.username && user.email && <small>{user.email}</small>}
+                    {canChangeSheetUserRole(user) ? (
+                      <select
+                        value={user.role}
+                        onChange={(e) => updateCollaboratorRole(user, e.target.value)}
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="editor">Editor</option>
+                        {canGrantSheetAdmin && <option value="admin">Admin</option>}
+                      </select>
+                    ) : (
+                      <small>{user.role}</small>
+                    )}
                   </div>
-                  {user.role !== "owner" && (
+                  {canChangeSheetUserRole(user) && (
                     <button
                       className="user-remove-btn"
                       onClick={() => removeCollaborator(user.userId)}
@@ -2383,13 +2620,18 @@ function App() {
             </div>
           )}
 
-          {selectedSheet && canManage && (
+          {selectedSheet && canManageSheetUsers && (
             <div className="drawer-section">
               <h4>Share Sheet</h4>
-              <input placeholder="email" value={shareEmail} onChange={(e) => setShareEmail(e.target.value)} />
+              <input
+                placeholder="username or email"
+                value={shareEmail}
+                onChange={(e) => setShareEmail(e.target.value)}
+              />
               <select value={shareRole} onChange={(e) => setShareRole(e.target.value)}>
                 <option value="viewer">Viewer</option>
                 <option value="editor">Editor</option>
+                {canGrantSheetAdmin && <option value="admin">Admin</option>}
               </select>
               <button onClick={shareSheet}>Share</button>
             </div>
@@ -2446,9 +2688,125 @@ function App() {
         </aside>
       )}
 
-      {!selectedSheet ? (
+      {currentPage === "profile" ? (
+        <main className="settings-page">
+          <section className="settings-panel">
+            <h2>Profile</h2>
+            <div className="profile-image-row">
+              <div className="profile-avatar">
+                {profileForm.avatarUrl ? (
+                  <img src={profileForm.avatarUrl} alt="" />
+                ) : (
+                  <span>{(profileForm.username || profileForm.email || "U").charAt(0).toUpperCase()}</span>
+                )}
+              </div>
+              <div className="profile-image-actions">
+                <label className="file-pick-btn">
+                  Upload Photo
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={(e) => updateProfileImage(e.target.files?.[0])}
+                  />
+                </label>
+                {profileForm.avatarUrl && (
+                  <button
+                    className="ghost-inline-btn"
+                    onClick={() => setProfileForm((form) => ({ ...form, avatarUrl: "" }))}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <label>Username</label>
+            <input
+              value={profileForm.username}
+              onChange={(e) => setProfileForm((form) => ({ ...form, username: e.target.value }))}
+            />
+
+            <label>Email</label>
+            <input
+              value={profileForm.email}
+              onChange={(e) => setProfileForm((form) => ({ ...form, email: e.target.value }))}
+            />
+
+            <button onClick={saveProfile}>Save Profile</button>
+          </section>
+
+          <section className="settings-panel">
+            <h2>Password</h2>
+            <label>Current Password</label>
+            <input
+              type="password"
+              value={passwordForm.currentPassword}
+              onChange={(e) => setPasswordForm((form) => ({ ...form, currentPassword: e.target.value }))}
+            />
+
+            <label>New Password</label>
+            <input
+              type="password"
+              value={passwordForm.newPassword}
+              onChange={(e) => setPasswordForm((form) => ({ ...form, newPassword: e.target.value }))}
+            />
+
+            <button onClick={changePassword}>Change Password</button>
+          </section>
+        </main>
+      ) : currentPage === "admin" ? (
+        <main className="settings-page">
+          <section className="settings-panel admin-panel">
+            <h2>Admin</h2>
+            <div className="admin-grid">
+              <div className="stat">Workspaces: {analytics?.totalWorkspaces || 0}</div>
+              <div className="stat">Sheets: {analytics?.totalSheets || dashboardStats.sheets}</div>
+              <div className="stat">Users: {analytics?.totalUsers || 0}</div>
+              <div className="stat">Changes: {analytics?.totalChanges || 0}</div>
+              <div className="stat">ERP Sheets: {analytics?.erpSheets || 0}</div>
+            </div>
+          </section>
+        </main>
+      ) : !selectedSheet ? (
         <main className="empty-excel">
-          <h2>Open menu to create ERP Item Master sheet or select a sheet</h2>
+          <section className="welcome-panel">
+            <span className="welcome-kicker">Sheet SaaS</span>
+            <h2>ERP item master workspace built for clean, collaborative data.</h2>
+            <p>
+              This app helps teams create and manage structured spreadsheet data with controlled
+              dropdowns, live collaboration, import/export tools, sharing permissions, and change
+              tracking in one focused workspace.
+            </p>
+
+            <div className="welcome-features">
+              <div>
+                <strong>Controlled Data</strong>
+                <span>ERP dropdowns keep groups, units, confirmations, and item details consistent.</span>
+              </div>
+              <div>
+                <strong>Team Workflow</strong>
+                <span>Share sheets with collaborators and work together with realtime updates.</span>
+              </div>
+              <div>
+                <strong>Export Ready</strong>
+                <span>Import Excel files and export clean CSV, Excel, or PDF outputs when needed.</span>
+              </div>
+            </div>
+
+            <div className="creator-card">
+              <div>
+                <small>Created by</small>
+                <strong>Mohamed Helmy</strong>
+              </div>
+              <a
+                href="https://www.linkedin.com/in/mohamed-helmy-94503b314?utm_source=share&utm_campaign=share_via&utm_content=profile&utm_medium=android_app"
+                target="_blank"
+                rel="noreferrer"
+              >
+                LinkedIn Profile
+              </a>
+            </div>
+          </section>
         </main>
       ) : (
         <main className="sheet-fullscreen">
@@ -2467,7 +2825,7 @@ function App() {
             />
             <div className="online-users">
               {onlineUsers.map((u) => (
-                <small key={u.socketId}>{u.email}</small>
+                <small key={u.socketId}>{u.username || u.email}</small>
               ))}
             </div>
           </div>

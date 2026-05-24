@@ -139,6 +139,7 @@ const DEFAULT_COLUMN_WIDTHS = {
   11: 92,
   12: 150,
   13: 92,
+  14: 220,
 };
 
 const DEFAULT_SHEET_ROWS = 500;
@@ -177,6 +178,24 @@ const colName = (index) => {
 const cellAddress = (rowIndex, colIndex) => {
   return colName(colIndex) + String(rowIndex + 1);
 };
+
+const visibleItemMasterHeaders = [
+  "اسم الصنف",
+  "الوصف",
+  "المجموعة الرئيسية",
+  "المجموعة الفرعية",
+  "المجموعة تحت الفرعية",
+  "المجموعة المساعدة",
+  "المجموعة التفصيلية",
+  "وحدة القياس",
+  "الصلاحية",
+  "التسلسل",
+  "ملاحظات",
+  "التأكيد الأول",
+  "الكود",
+  "التأكيد الثاني",
+  "Modified Description",
+];
 
 const createERPTemplateData = (type) => {
   const headersByType = {
@@ -285,7 +304,9 @@ const createERPTemplateData = (type) => {
     ],
   };
 
-  const headers = headersByType[type] || headersByType["item-master"];
+  const headers = type === "item-master"
+    ? visibleItemMasterHeaders
+    : headersByType[type] || headersByType["item-master"];
   const data = createEmptySheetData();
 
   headers.slice(0, DEFAULT_SHEET_COLS).forEach((header, index) => {
@@ -310,10 +331,53 @@ const signToken = (user) => {
     {
       id: user._id.toString(),
       email: user.email,
+      username: user.username || user.email,
+      role: user.role || "user",
     },
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
   );
+};
+
+const toUserResponse = (user) => ({
+  id: user._id,
+  email: user.email,
+  username: user.username || user.email,
+  role: user.role || "user",
+  avatarUrl: user.avatarUrl || "",
+});
+
+const normalizeUsername = (value) => {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 60);
+};
+
+const getDefaultUsername = (email) => String(email || "").split("@")[0] || "user";
+
+const normalizeAvatarUrl = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return "";
+
+  if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(text)) {
+    return null;
+  }
+
+  return text.length <= 2_500_000 ? text : null;
+};
+
+const createUniqueUsername = async (email, requestedUsername = "") => {
+  const base = normalizeUsername(requestedUsername) || getDefaultUsername(email);
+  let username = base;
+  let suffix = 2;
+
+  while (await User.exists({ username })) {
+    username = `${base}${suffix}`;
+    suffix += 1;
+  }
+
+  return username;
 };
 
 const auth = (req, res, next) => {
@@ -342,9 +406,23 @@ const getUserRole = (sheet, userId) => {
   return collaborator ? collaborator.role : null;
 };
 
-const canRead = (role) => ["owner", "editor", "viewer"].includes(role);
-const canEdit = (role) => ["owner", "editor"].includes(role);
+const canRead = (role) => ["owner", "admin", "editor", "viewer"].includes(role);
+const canEdit = (role) => ["owner", "admin", "editor"].includes(role);
 const canManage = (role) => role === "owner";
+const canManageSheetUsers = (role) => ["owner", "admin"].includes(role);
+const canAssignSheetRole = (actorRole, currentRole, nextRole) => {
+  if (currentRole === "owner" || nextRole === "owner") return false;
+  if (actorRole === "owner") return ["admin", "editor", "viewer"].includes(nextRole);
+  if (actorRole === "admin") {
+    return currentRole !== "admin" && ["editor", "viewer"].includes(nextRole);
+  }
+  return false;
+};
+const canRemoveSheetCollaborator = (actorRole, targetRole) => {
+  if (targetRole === "owner") return false;
+  if (actorRole === "owner") return true;
+  return actorRole === "admin" && targetRole !== "admin";
+};
 
 const findSheetForUser = async (sheetId, userId) => {
   const sheet = await Sheet.findById(sheetId);
@@ -368,6 +446,31 @@ const findSheetForUserProjected = async (sheetId, userId, projection) => {
   const role = getUserRole(sheet, userId);
 
   return { sheet, role };
+};
+
+const hydrateCollaboratorUsernames = async (sheet) => {
+  if (!sheet?.collaborators?.some((collaborator) => !collaborator.username)) return false;
+
+  const userIds = sheet.collaborators.map((collaborator) => collaborator.userId).filter(Boolean);
+  const users = await User.find({ _id: { $in: userIds } }).select("email username").lean();
+  const userMap = new Map(users.map((user) => [user._id.toString(), user]));
+  let changed = false;
+
+  sheet.collaborators.forEach((collaborator) => {
+    const user = userMap.get(collaborator.userId?.toString());
+    if (!user) return;
+
+    if (!collaborator.username) {
+      collaborator.username = user.username || user.email;
+      changed = true;
+    }
+    if (collaborator.email !== user.email) {
+      collaborator.email = user.email;
+      changed = true;
+    }
+  });
+
+  return changed;
 };
 
 const getWorkspaceRole = (workspace, userId) => {
@@ -648,6 +751,7 @@ app.post("/signup", authLimiter, async (req, res) => {
   try {
     const email = String(req.body.email || "").toLowerCase().trim();
     const password = String(req.body.password || "");
+    const username = normalizeUsername(req.body.username) || await createUniqueUsername(email);
 
     if (!email || !password) {
       return res.status(400).json({ message: "Email and password are required" });
@@ -668,6 +772,8 @@ app.post("/signup", authLimiter, async (req, res) => {
     const user = await User.create({
       email,
       password: hashedPassword,
+      username,
+      role: "user",
     });
 
     const token = signToken(user);
@@ -675,12 +781,12 @@ app.post("/signup", authLimiter, async (req, res) => {
     res.status(201).json({
       message: "User created successfully",
       token,
-      user: {
-        id: user._id,
-        email: user.email,
-      },
+      user: toUserResponse(user),
     });
   } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ message: "Email or username already exists" });
+    }
     res.status(500).json({ message: "Signup failed" });
   }
 });
@@ -711,10 +817,7 @@ app.post("/login", authLimiter, async (req, res) => {
     res.json({
       message: "Login successful",
       token,
-      user: {
-        id: user._id,
-        email: user.email,
-      },
+      user: toUserResponse(user),
     });
   } catch (error) {
     res.status(500).json({ message: "Login failed" });
@@ -722,12 +825,117 @@ app.post("/login", authLimiter, async (req, res) => {
 });
 
 app.get("/me", auth, async (req, res) => {
-  res.json({
-    user: {
-      id: req.user.id,
-      email: req.user.email,
-    },
-  });
+  const user = await User.findById(req.user.id);
+
+  if (!user) {
+    return res.status(404).json({ message: "User not found" });
+  }
+
+  res.json({ user: toUserResponse(user) });
+});
+
+app.patch("/me", auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const email = String(req.body.email || user.email).toLowerCase().trim();
+    const username = normalizeUsername(req.body.username) || user.username || getDefaultUsername(email);
+    const avatarUrl = normalizeAvatarUrl(req.body.avatarUrl);
+
+    if (!email || !email.includes("@")) {
+      return res.status(400).json({ message: "Valid email is required" });
+    }
+
+    if (username.length < 2) {
+      return res.status(400).json({ message: "Username must be at least 2 characters" });
+    }
+
+    if (avatarUrl === null) {
+      return res.status(400).json({ message: "Profile image must be PNG, JPG, or WEBP and under 2 MB" });
+    }
+
+    const existingEmail = await User.findOne({ email, _id: { $ne: user._id } });
+    if (existingEmail) {
+      return res.status(409).json({ message: "Email already exists" });
+    }
+
+    const existingUsername = await User.findOne({ username, _id: { $ne: user._id } });
+    if (existingUsername) {
+      return res.status(409).json({ message: "Username already exists" });
+    }
+
+    const oldEmail = user.email;
+    const oldUsername = user.username;
+    user.email = email;
+    user.username = username;
+    user.avatarUrl = avatarUrl;
+    await user.save();
+
+    if (oldEmail !== email || oldUsername !== username) {
+      await Promise.all([
+        Sheet.updateMany(
+          { "collaborators.userId": user._id },
+          {
+            $set: {
+              "collaborators.$[member].email": email,
+              "collaborators.$[member].username": username,
+            },
+          },
+          { arrayFilters: [{ "member.userId": user._id }] }
+        ),
+        Workspace.updateMany(
+          { "members.userId": user._id },
+          { $set: { "members.$[member].email": email } },
+          { arrayFilters: [{ "member.userId": user._id }] }
+        ),
+      ]);
+    }
+
+    res.json({
+      user: toUserResponse(user),
+      token: signToken(user),
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to update profile" });
+  }
+});
+
+app.patch("/me/password", authLimiter, auth, async (req, res) => {
+  try {
+    const currentPassword = String(req.body.currentPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current and new password are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    const user = await User.findById(req.user.id);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const isPasswordCorrect = await bcrypt.compare(currentPassword, user.password);
+
+    if (!isPasswordCorrect) {
+      return res.status(401).json({ message: "Current password is incorrect" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to change password" });
+  }
 });
 
 /* WORKSPACES */
@@ -871,6 +1079,7 @@ app.post("/sheet", auth, async (req, res) => {
         {
           userId: req.user.id,
           email: req.user.email,
+          username: req.user.username || req.user.email,
           role: "owner",
         },
       ],
@@ -931,6 +1140,7 @@ app.get("/sheet/:id", auth, async (req, res) => {
 
     if (!sheet.meta) sheet.meta = createDefaultMeta();
     if (!sheet.erpOptions) sheet.erpOptions = createDefaultErpOptions();
+    await hydrateCollaboratorUsernames(sheet);
 
     await sheet.save();
 
@@ -1360,18 +1570,24 @@ app.post("/sheet/:id/share", auth, async (req, res) => {
   try {
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
 
-    if (!sheet || !canManage(role)) {
-      return res.status(403).json({ message: "Only owner can share sheet" });
+    if (!sheet || !canManageSheetUsers(role)) {
+      return res.status(403).json({ message: "Only sheet admins can share sheet" });
     }
 
-    const email = String(req.body.email || "").toLowerCase().trim();
+    const identifier = String(req.body.identifier || req.body.email || "").trim();
+    const email = identifier.toLowerCase();
     const newRole = String(req.body.role || "viewer");
 
-    if (!email || !["editor", "viewer"].includes(newRole)) {
-      return res.status(400).json({ message: "Valid email and role are required" });
+    if (!identifier || !["admin", "editor", "viewer"].includes(newRole)) {
+      return res.status(400).json({ message: "Valid username/email and role are required" });
     }
 
-    const userToShare = await User.findOne({ email });
+    const userToShare = await User.findOne({
+      $or: [
+        { email },
+        { username: identifier },
+      ],
+    });
 
     if (!userToShare) {
       return res.status(404).json({ message: "User must sign up before sharing" });
@@ -1382,16 +1598,22 @@ app.post("/sheet/:id/share", auth, async (req, res) => {
     );
 
     if (existing) {
-      if (existing.role === "owner") {
-        return res.status(400).json({ message: "Owner role cannot be changed" });
+      if (!canAssignSheetRole(role, existing.role, newRole)) {
+        return res.status(403).json({ message: "You cannot assign this role" });
       }
 
       existing.role = newRole;
       existing.email = userToShare.email;
+      existing.username = userToShare.username || userToShare.email;
     } else {
+      if (!canAssignSheetRole(role, null, newRole)) {
+        return res.status(403).json({ message: "You cannot assign this role" });
+      }
+
       sheet.collaborators.push({
         userId: userToShare._id,
         email: userToShare.email,
+        username: userToShare.username || userToShare.email,
         role: newRole,
       });
     }
@@ -1410,14 +1632,14 @@ app.delete("/sheet/:id/collaborator/:userId", auth, async (req, res) => {
   try {
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
 
-    if (!sheet || !canManage(role)) {
-      return res.status(403).json({ message: "Only owner can remove collaborators" });
+    if (!sheet || !canManageSheetUsers(role)) {
+      return res.status(403).json({ message: "Only sheet admins can remove collaborators" });
     }
 
     sheet.collaborators = sheet.collaborators.filter(
       (item) =>
         item.userId.toString() !== req.params.userId ||
-        item.role === "owner"
+        !canRemoveSheetCollaborator(role, item.role)
     );
 
     await sheet.save();
@@ -1623,6 +1845,7 @@ io.on("connection", (socket) => {
         socketId: socket.id,
         userId: socket.user.id,
         email: socket.user.email,
+        username: socket.user.username || socket.user.email,
         role,
       });
 

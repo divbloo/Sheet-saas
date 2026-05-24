@@ -1,4 +1,4 @@
-const DEFAULT_SHEET_COLS = 14;
+const DEFAULT_SHEET_COLS = 15;
 const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 
 const defaultCellStyle = {
