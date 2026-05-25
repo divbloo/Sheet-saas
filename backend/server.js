@@ -119,10 +119,17 @@ if (!process.env.JWT_SECRET) {
 
 verifyProductionSecurity();
 
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => console.log("DB Connected"))
-  .catch((err) => console.error("DB Connection Error:", err));
+const connectToDatabase = async () => {
+  try {
+    await mongoose.connect(process.env.MONGO_URI, {
+      serverSelectionTimeoutMS: 15000,
+    });
+    console.log("DB Connected");
+  } catch (error) {
+    console.error("DB Connection Error:", error);
+    process.exit(1);
+  }
+};
 
 const DEFAULT_COLUMN_WIDTHS = {
   0: 300,
@@ -2035,6 +2042,8 @@ if (process.env.NODE_ENV === "production") {
   }
 }
 
-server.listen(PORT, () => {
-  console.log("SaaS API running on port " + PORT);
+connectToDatabase().then(() => {
+  server.listen(PORT, () => {
+    console.log("SaaS API running on port " + PORT);
+  });
 });
