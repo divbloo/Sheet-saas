@@ -748,7 +748,7 @@ const createChangeLog = async ({
   });
 };
 
-app.get("/", (req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({ message: "Sheet SaaS API is running" });
 });
 
