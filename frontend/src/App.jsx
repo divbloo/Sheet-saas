@@ -756,7 +756,6 @@ function App() {
     setRole(data.role);
     setSelectedCell(null);
     setSelectedRange(null);
-    setSheetRowTotal(0);
     setGridScrollTop(0);
     setVisibleRows(INITIAL_VISIBLE_ROWS);
     setCurrentPage("sheet");
