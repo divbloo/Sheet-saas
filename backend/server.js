@@ -1292,7 +1292,7 @@ app.put("/sheet/:id", auth, async (req, res) => {
 
     sheet.meta = req.body.meta || sheet.meta || createDefaultMeta();
 
-    if (Array.isArray(req.body.data)) {
+    if (req.body.replaceRows === true && Array.isArray(req.body.data)) {
       await SheetRow.deleteMany({ sheetId: sheet._id });
       await SheetRow.insertMany(
         req.body.data.map((row, rowIndex) => ({
@@ -1333,7 +1333,7 @@ app.put("/sheet/:id", auth, async (req, res) => {
     });
 
     const sheetObject = sheet.toObject();
-    sheetObject.data = Array.isArray(req.body.data)
+    sheetObject.data = req.body.replaceRows === true && Array.isArray(req.body.data)
       ? req.body.data.map((row) => normalizeRowCells(row))
       : [];
 

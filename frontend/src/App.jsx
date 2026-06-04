@@ -1801,9 +1801,9 @@ function App() {
 
     setSavingStatus("Saving...");
 
-    const hasAllRowsLoaded = sheet.data.length >= sheetRowTotal;
+    const hasAllRowsLoaded = sheetRowTotal > 0 && sheet.data.length >= sheetRowTotal;
     const payload = hasAllRowsLoaded
-      ? { data: sheet.data, meta: sheet.meta }
+      ? { data: sheet.data, meta: sheet.meta, replaceRows: true }
       : { meta: sheet.meta };
 
     const res = await authFetch(API_URL + "/sheet/" + sheet._id, {
