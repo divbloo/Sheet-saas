@@ -595,7 +595,7 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
 
 const getSheetRowCount = async (sheetId) => {
   const lastRow = await SheetRow.findOne({ sheetId }).sort({ rowIndex: -1 }).select("rowIndex").lean();
-  return lastRow ? lastRow.rowIndex + 1 : 0;
+  return Math.max(DEFAULT_SHEET_ROWS, lastRow ? lastRow.rowIndex + 1 : 0);
 };
 
 const appendRowsToSheet = async (sheetId, count) => {
@@ -1293,6 +1293,16 @@ app.put("/sheet/:id", auth, async (req, res) => {
     sheet.meta = req.body.meta || sheet.meta || createDefaultMeta();
 
     if (req.body.replaceRows === true && Array.isArray(req.body.data)) {
+      const currentRowCount = await getSheetRowCount(sheet._id);
+
+      if (req.body.data.length < currentRowCount) {
+        return res.status(409).json({
+          message: "Refusing to replace sheet with fewer rows than currently stored",
+          currentRowCount,
+          submittedRowCount: req.body.data.length,
+        });
+      }
+
       await SheetRow.deleteMany({ sheetId: sheet._id });
       await SheetRow.insertMany(
         req.body.data.map((row, rowIndex) => ({
