@@ -127,6 +127,10 @@ const VIRTUAL_ROW_WINDOW = 90;
 const AUTO_FIT_SAMPLE_ROWS = 60;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const normalizeRowTotal = (...values) => Math.max(
+  MIN_SHEET_ROWS,
+  ...values.map((value) => Number(value) || 0)
+);
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -190,6 +194,7 @@ function App() {
   const saveTimerRef = useRef(null);
   const cellSaveTimerRef = useRef(null);
   const pendingCellSaveRef = useRef(null);
+  const rowsLoadingRef = useRef(false);
   const fileInputRef = useRef(null);
   const contextMenuRef = useRef(null);
 
@@ -751,7 +756,7 @@ function App() {
     const normalized = normalizeSheet(data.sheet, { minRows: 0 });
 
     setSelectedSheet(normalized);
-    setSheetRowTotal(data.rows?.total || normalized.data.length);
+    setSheetRowTotal(normalizeRowTotal(data.rows?.total, normalized.data.length));
     setErpOptions(normalized.erpOptions || defaultErpOptions);
     setRole(data.role);
     setSelectedCell(null);
@@ -1341,7 +1346,7 @@ function App() {
   };
 
   const loadMoreRows = async () => {
-    if (!selectedSheet || rowsLoading) return;
+    if (!selectedSheet || rowsLoadingRef.current) return;
 
     const loadedRows = selectedSheet.data.length;
 
@@ -1352,32 +1357,48 @@ function App() {
 
     if (loadedRows >= sheetRowTotal) return;
 
+    rowsLoadingRef.current = true;
     setRowsLoading(true);
 
-    const res = await authFetch(
-      API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + ROW_LOAD_STEP
-    );
-    const data = await res.json();
+    try {
+      const res = await authFetch(
+        API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + ROW_LOAD_STEP
+      );
+      const data = await res.json();
 
-    if (!res.ok) {
-      showMessage(data.message || "Failed to load rows");
+      if (!res.ok) {
+        showMessage(data.message || "Failed to load rows");
+        return;
+      }
+
+      const expectedRowCount = Math.min(ROW_LOAD_STEP, sheetRowTotal - loadedRows);
+      const normalizedRows = normalizeData(data.rows || [], expectedRowCount);
+
+      setSelectedSheet((prev) => (
+        prev
+          ? {
+              ...prev,
+              data: [...prev.data, ...normalizedRows],
+            }
+          : prev
+      ));
+      setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
+      setVisibleRows((count) => Math.min(count + normalizedRows.length, loadedRows + normalizedRows.length));
+    } catch {
+      showMessage("Failed to load rows");
+    } finally {
+      rowsLoadingRef.current = false;
       setRowsLoading(false);
-      return;
     }
+  };
 
-    const normalizedRows = normalizeData(data.rows || [], 0);
+  const handleGridScroll = (event) => {
+    const grid = event.currentTarget;
+    setGridScrollTop(grid.scrollTop);
 
-    setSelectedSheet((prev) => (
-      prev
-        ? {
-            ...prev,
-            data: [...prev.data, ...normalizedRows],
-          }
-        : prev
-    ));
-    setSheetRowTotal(data.total || sheetRowTotal);
-    setVisibleRows((count) => Math.min(count + normalizedRows.length, loadedRows + normalizedRows.length));
-    setRowsLoading(false);
+    if (grid.scrollHeight - grid.scrollTop - grid.clientHeight <= DEFAULT_ROW_HEIGHT * 4) {
+      void loadMoreRows();
+    }
   };
 
   const ensureRowsLoaded = async (targetCount) => {
@@ -1401,12 +1422,11 @@ function App() {
         break;
       }
 
-      const normalizedRows = normalizeData(data.rows || [], 0);
-      if (normalizedRows.length === 0) break;
+      const normalizedRows = normalizeData(data.rows || [], limit);
 
       loadedChunks.push(...normalizedRows);
       loadedRows += normalizedRows.length;
-      setSheetRowTotal(data.total || sheetRowTotal);
+      setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
     }
 
     if (loadedChunks.length > 0) {
@@ -1441,8 +1461,7 @@ function App() {
         break;
       }
 
-      const normalizedRows = normalizeData(data.rows || [], 0);
-      if (normalizedRows.length === 0) break;
+      const normalizedRows = normalizeData(data.rows || [], limit);
 
       allRows.push(...normalizedRows);
       loadedRows += normalizedRows.length;
@@ -1751,7 +1770,7 @@ function App() {
     const initialRows = importedData.slice(0, INITIAL_VISIBLE_ROWS);
 
     setSelectedSheet((prev) => ({ ...prev, data: initialRows }));
-    setSheetRowTotal(importedData.length);
+    setSheetRowTotal(normalizeRowTotal(importedData.length));
     setVisibleRows(Math.min(INITIAL_VISIBLE_ROWS, importedData.length));
     setGridScrollTop(0);
     setSavingStatus("Saved");
@@ -2785,7 +2804,7 @@ function App() {
             </div>
           </div>
 
-          <div className="grid-wrap-full" onScroll={(e) => setGridScrollTop(e.currentTarget.scrollTop)}>
+          <div className="grid-wrap-full" onScroll={handleGridScroll}>
             <table className="sheet-table-full">
               <colgroup>
                 <col className="corner-col" />
@@ -2951,7 +2970,7 @@ function App() {
               </tbody>
             </table>
 
-            {(visibleRows < selectedSheet.data.length || selectedSheet.data.length < sheetRowTotal) && (
+            {visibleRows < sheetRowTotal && (
               <div className="load-rows-bar">
                 <button disabled={rowsLoading} onClick={loadMoreRows}>
                   {rowsLoading
