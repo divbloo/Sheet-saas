@@ -149,7 +149,7 @@ const DEFAULT_COLUMN_WIDTHS = {
   14: 220,
 };
 
-const DEFAULT_SHEET_ROWS = 500;
+const DEFAULT_SHEET_ROWS = 5000;
 const DEFAULT_ROW_PAGE_SIZE = 50;
 const MAX_ROW_PAGE_SIZE = 500;
 const ALLOWED_SHEET_TYPES = new Set(["custom", "item-master"]);
@@ -314,7 +314,7 @@ const createERPTemplateData = (type) => {
   const headers = type === "item-master"
     ? visibleItemMasterHeaders
     : headersByType[type] || headersByType["item-master"];
-  const data = createEmptySheetData();
+  const data = createEmptySheetData(1);
 
   headers.slice(0, DEFAULT_SHEET_COLS).forEach((header, index) => {
     data[0][index] = {
@@ -522,9 +522,8 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
   const existingRowCount = await SheetRow.countDocuments({ sheetId: sheet._id });
   if (existingRowCount > 0) return;
 
-  const sourceRows = Array.isArray(sheet.data) && sheet.data.length > 0
-    ? sheet.data
-    : createEmptySheetData();
+  const sourceRows = Array.isArray(sheet.data) ? sheet.data : [];
+  if (sourceRows.length === 0) return;
 
   if (sourceRows.length > 0) {
     try {
@@ -596,22 +595,6 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
 const getSheetRowCount = async (sheetId) => {
   const lastRow = await SheetRow.findOne({ sheetId }).sort({ rowIndex: -1 }).select("rowIndex").lean();
   return Math.max(DEFAULT_SHEET_ROWS, lastRow ? lastRow.rowIndex + 1 : 0);
-};
-
-const appendRowsToSheet = async (sheetId, count) => {
-  const start = await getSheetRowCount(sheetId);
-  const rows = createEmptySheetData(count, DEFAULT_SHEET_COLS);
-
-  await SheetRow.insertMany(
-    rows.map((row, offset) => ({
-      sheetId,
-      rowIndex: start + offset,
-      cells: row,
-      searchText: buildRowSearchText(row),
-    }))
-  );
-
-  return { rows, start, total: start + rows.length };
 };
 
 const ensureSheetRow = async (sheetId, rowIndex) => {
@@ -1060,7 +1043,7 @@ app.post("/sheet", auth, async (req, res) => {
     }
 
     const isERP = erpType !== "custom";
-    const initialRows = isERP ? createERPTemplateData(erpType) : createEmptySheetData();
+    const initialRows = isERP ? createERPTemplateData(erpType) : [];
 
     const sheet = await Sheet.create({
       name: req.body.name || "New Sheet",
@@ -1092,14 +1075,18 @@ app.post("/sheet", auth, async (req, res) => {
       ],
     });
 
-    await SheetRow.insertMany(
-      initialRows.map((row, rowIndex) => ({
+    const initialRowDocuments = initialRows
+      .map((row, rowIndex) => ({
         sheetId: sheet._id,
         rowIndex,
         cells: normalizeRowCells(row),
         searchText: buildRowSearchText(row),
       }))
-    );
+      .filter((row) => row.searchText);
+
+    if (initialRowDocuments.length > 0) {
+      await SheetRow.insertMany(initialRowDocuments);
+    }
 
     res.status(201).json(sheet);
   } catch (error) {
@@ -1292,31 +1279,7 @@ app.put("/sheet/:id", auth, async (req, res) => {
 
     sheet.meta = req.body.meta || sheet.meta || createDefaultMeta();
 
-    if (req.body.replaceRows === true && Array.isArray(req.body.data)) {
-      const currentRowCount = await getSheetRowCount(sheet._id);
-
-      if (req.body.data.length < currentRowCount) {
-        return res.status(409).json({
-          message: "Refusing to replace sheet with fewer rows than currently stored",
-          currentRowCount,
-          submittedRowCount: req.body.data.length,
-        });
-      }
-
-      await SheetRow.deleteMany({ sheetId: sheet._id });
-      await SheetRow.insertMany(
-        req.body.data.map((row, rowIndex) => ({
-          sheetId: sheet._id,
-          rowIndex,
-          cells: normalizeRowCells(row),
-          searchText: buildRowSearchText(row),
-        }))
-      );
-      sheet.data = [];
-      sheet.markModified("data");
-    } else {
-      await migrateSheetRowsIfNeeded(sheet);
-    }
+    await migrateSheetRowsIfNeeded(sheet);
 
     sheet.analytics = {
       ...(sheet.analytics || {}),
@@ -1343,52 +1306,13 @@ app.put("/sheet/:id", auth, async (req, res) => {
     });
 
     const sheetObject = sheet.toObject();
-    sheetObject.data = req.body.replaceRows === true && Array.isArray(req.body.data)
-      ? req.body.data.map((row) => normalizeRowCells(row))
-      : [];
+    sheetObject.data = [];
 
     io.to(req.params.id).emit("sheet-saved", sheetObject);
 
     res.json({ ok: true, sheet: sheetObject });
   } catch (error) {
     res.status(500).json({ message: "Failed to update sheet" });
-  }
-});
-
-app.post("/sheet/:id/rows", auth, async (req, res) => {
-  try {
-    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
-
-    if (!sheet || !canEdit(role)) {
-      return res.status(403).json({ message: "You do not have edit permission" });
-    }
-
-    const count = Math.min(
-      Math.max(1, Number.parseInt(req.body.count, 10) || DEFAULT_SHEET_ROWS),
-      DEFAULT_SHEET_ROWS
-    );
-    await migrateSheetRowsIfNeeded(sheet);
-    const { rows, start, total } = await appendRowsToSheet(sheet._id, count);
-
-    sheet.analytics = {
-      ...(sheet.analytics || {}),
-      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
-      totalMergedCells: sheet.meta?.merges?.length || 0,
-      lastEditedBy: req.user.email,
-      lastEditedAt: new Date(),
-    };
-
-    await sheet.save();
-
-    res.json({
-      rows,
-      start,
-      count,
-      total,
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to add rows" });
   }
 });
 

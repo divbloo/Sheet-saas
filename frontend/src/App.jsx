@@ -115,9 +115,9 @@ const visibleErpHeaders = [
 
 const COLS = 15;
 const LEGACY_PACKAGE_COLUMN_INDEX = 8;
-const MIN_SHEET_ROWS = 500;
-const ADD_ROWS_STEP = 500;
+const MIN_SHEET_ROWS = 5000;
 const IMPORT_BATCH_SIZE = 500;
+const EXPORT_ROW_BATCH_SIZE = 500;
 const INITIAL_VISIBLE_ROWS = 50;
 const ROW_LOAD_STEP = 50;
 const CONTEXT_MENU_MARGIN = 8;
@@ -1340,40 +1340,6 @@ function App() {
     queueMetadataSave();
   };
 
-  const addRows = (count = ADD_ROWS_STEP) => {
-    if (!selectedSheet || !canEdit) return;
-    setRowsLoading(true);
-
-    authFetch(API_URL + "/sheet/" + selectedSheet._id + "/rows", {
-      method: "POST",
-      body: JSON.stringify({ count }),
-    })
-      .then(async (res) => {
-        const data = await res.json();
-
-        if (!res.ok) {
-          showMessage(data.message || "Failed to add rows");
-          return;
-        }
-
-        const normalizedRows = normalizeData(data.rows || [], 0);
-
-        setSelectedSheet((prev) => (
-          prev
-            ? {
-                ...prev,
-                data: [...prev.data, ...normalizedRows],
-              }
-            : prev
-        ));
-        setSheetRowTotal(data.total || 0);
-        setVisibleRows((current) => current + normalizedRows.length);
-        showMessage(`${normalizedRows.length} rows added`);
-      })
-      .catch(() => showMessage("Failed to add rows"))
-      .finally(() => setRowsLoading(false));
-  };
-
   const loadMoreRows = async () => {
     if (!selectedSheet || rowsLoading) return;
 
@@ -1464,7 +1430,7 @@ function App() {
     let loadedRows = allRows.length;
 
     while (loadedRows < sheetRowTotal) {
-      const limit = Math.min(ADD_ROWS_STEP, sheetRowTotal - loadedRows);
+      const limit = Math.min(EXPORT_ROW_BATCH_SIZE, sheetRowTotal - loadedRows);
       const res = await authFetch(
         API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + limit
       );
@@ -1801,14 +1767,9 @@ function App() {
 
     setSavingStatus("Saving...");
 
-    const hasAllRowsLoaded = sheetRowTotal > 0 && sheet.data.length >= sheetRowTotal;
-    const payload = hasAllRowsLoaded
-      ? { data: sheet.data, meta: sheet.meta, replaceRows: true }
-      : { meta: sheet.meta };
-
     const res = await authFetch(API_URL + "/sheet/" + sheet._id, {
       method: "PUT",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ meta: sheet.meta }),
     });
 
     const data = await res.json();
@@ -1819,18 +1780,13 @@ function App() {
       return;
     }
 
-    const normalized = normalizeSheet(data.sheet, {
-      minRows: hasAllRowsLoaded ? MIN_SHEET_ROWS : 0,
-    });
+    const normalized = normalizeSheet(data.sheet, { minRows: 0 });
 
     setSelectedSheet((prev) => (
-      hasAllRowsLoaded
-        ? normalized
-        : prev
-          ? { ...prev, meta: normalized.meta, analytics: normalized.analytics }
-          : normalized
+      prev
+        ? { ...prev, meta: normalized.meta, analytics: normalized.analytics }
+        : normalized
     ));
-    setSheetRowTotal(hasAllRowsLoaded ? normalized.data.length : sheetRowTotal);
     setSavingStatus("Saved");
     if (!silent) showMessage("Sheet saved");
     await loadAnalytics();
@@ -3005,13 +2961,6 @@ function App() {
               </div>
             )}
 
-            {selectedSheet.data.length >= sheetRowTotal && (
-              <div className="load-rows-bar">
-                <button disabled={!canEdit || rowsLoading} onClick={() => addRows()}>
-                  Add {ADD_ROWS_STEP} more rows ({sheetRowTotal} total)
-                </button>
-              </div>
-            )}
           </div>
 
           {contextMenu && (
