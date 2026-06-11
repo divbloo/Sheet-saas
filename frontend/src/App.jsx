@@ -193,7 +193,9 @@ function App() {
   const selectedSheetRef = useRef(null);
   const saveTimerRef = useRef(null);
   const cellSaveTimerRef = useRef(null);
+  const cellSaveInFlightRef = useRef(false);
   const pendingCellSaveRef = useRef(null);
+  const localCellDraftsRef = useRef(new Map());
   const rowsLoadingRef = useRef(false);
   const fileInputRef = useRef(null);
   const contextMenuRef = useRef(null);
@@ -984,6 +986,40 @@ function App() {
     setTimeout(() => setSavingStatus(""), 1200);
   };
 
+  const getCellPatchKey = (sheetId, patch) => {
+    return `${sheetId}:${patch.rowIndex}:${patch.colIndex}`;
+  };
+
+  const getPayloadPatches = (payload) => {
+    return Array.isArray(payload?.patches) && payload.patches.length > 0
+      ? payload.patches
+      : [payload];
+  };
+
+  const rememberLocalCellDrafts = (payload) => {
+    getPayloadPatches(payload).forEach((patch) => {
+      localCellDraftsRef.current.set(getCellPatchKey(payload.sheetId, patch), {
+        value: patch.value ?? "",
+        formula: patch.formula || "",
+      });
+    });
+  };
+
+  const clearSavedLocalCellDrafts = (payload) => {
+    getPayloadPatches(payload).forEach((patch) => {
+      const key = getCellPatchKey(payload.sheetId, patch);
+      const currentDraft = localCellDraftsRef.current.get(key);
+
+      if (
+        currentDraft &&
+        currentDraft.value === (patch.value ?? "") &&
+        currentDraft.formula === (patch.formula || "")
+      ) {
+        localCellDraftsRef.current.delete(key);
+      }
+    });
+  };
+
   const saveCellPatchesHttp = async (payload) => {
     if (!payload?.sheetId) return false;
 
@@ -1030,14 +1066,32 @@ function App() {
       cellSaveTimerRef.current = null;
     }
 
-    const payload = pendingCellSaveRef.current;
-    pendingCellSaveRef.current = null;
+    if (cellSaveInFlightRef.current) return;
 
+    const payload = pendingCellSaveRef.current;
     if (!payload) return;
-    void saveCellPatchesHttp(payload);
+    pendingCellSaveRef.current = null;
+    cellSaveInFlightRef.current = true;
+
+    void saveCellPatchesHttp(payload)
+      .then((saved) => {
+        if (saved) clearSavedLocalCellDrafts(payload);
+      })
+      .catch(() => {
+        setSavingStatus("Unsaved changes...");
+        showMessage("Failed to save cell");
+      })
+      .finally(() => {
+        cellSaveInFlightRef.current = false;
+
+        if (pendingCellSaveRef.current) {
+          cellSaveTimerRef.current = setTimeout(flushPendingCellSave, 0);
+        }
+      });
   };
 
   const queueCellSocketSave = (payload) => {
+    rememberLocalCellDrafts(payload);
     const pending = pendingCellSaveRef.current;
 
     if (pending && pending.sheetId === payload.sheetId) {
@@ -2036,9 +2090,16 @@ function App() {
     socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches }) => {
       setSelectedSheet((prev) => {
         if (!prev) return prev;
-        const incomingPatches = Array.isArray(patches) && patches.length > 0
-          ? patches
-          : [{ rowIndex, colIndex, value, formula }];
+        const incomingPatches = (
+          Array.isArray(patches) && patches.length > 0
+            ? patches
+            : [{ rowIndex, colIndex, value, formula }]
+        ).filter((patch) => (
+          !localCellDraftsRef.current.has(getCellPatchKey(prev._id, patch))
+        ));
+
+        if (incomingPatches.length === 0) return prev;
+
         const data = [...prev.data];
         const touchedRows = new Set(incomingPatches.map((patch) => patch.rowIndex));
 
