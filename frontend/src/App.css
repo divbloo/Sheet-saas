@@ -1062,6 +1062,17 @@ select:focus {
   vertical-align: top;
 }
 
+.sheet-table-full td.locked-sheet-cell {
+  box-shadow: inset 3px 0 0 #94a3b8;
+}
+
+.sheet-table-full td.locked-sheet-cell input:read-only,
+.sheet-table-full td.locked-sheet-cell textarea:read-only {
+  cursor: not-allowed;
+  color: #475569;
+  opacity: 0.82;
+}
+
 .virtual-spacer-row th,
 .virtual-spacer-row td {
   padding: 0;

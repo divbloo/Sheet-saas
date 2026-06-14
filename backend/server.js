@@ -152,6 +152,7 @@ const DEFAULT_COLUMN_WIDTHS = {
 const DEFAULT_SHEET_ROWS = 5000;
 const DEFAULT_ROW_PAGE_SIZE = 50;
 const MAX_ROW_PAGE_SIZE = 500;
+const ROW_LOCK_LAST_COLUMN_INDEX = 10;
 const ALLOWED_SHEET_TYPES = new Set(["custom", "item-master"]);
 
 const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_COLS) => {
@@ -159,6 +160,10 @@ const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_CO
     Array.from({ length: cols }, () => createCell(""))
   );
 };
+
+const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
+  .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
+  .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
 const createDefaultMeta = () => ({
   colWidths: { ...DEFAULT_COLUMN_WIDTHS },
@@ -416,6 +421,7 @@ const getUserRole = (sheet, userId) => {
 const canRead = (role) => ["owner", "admin", "editor", "viewer"].includes(role);
 const canEdit = (role) => ["owner", "admin", "editor"].includes(role);
 const canManage = (role) => role === "owner";
+const canBypassRowLocks = (role) => role === "owner" || role === "admin";
 const canManageSheetUsers = (role) => ["owner", "admin"].includes(role);
 const canAssignSheetRole = (actorRole, currentRole, nextRole) => {
   if (currentRole === "owner" || nextRole === "owner") return false;
@@ -526,14 +532,23 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
   if (sourceRows.length === 0) return;
 
   if (sourceRows.length > 0) {
+    const owner = sheet.collaborators?.find((collaborator) => collaborator.role === "owner");
+
     try {
       await SheetRow.insertMany(
-      sourceRows.map((row, rowIndex) => ({
-        sheetId: sheet._id,
-        rowIndex,
-        cells: normalizeRowCells(row),
-        searchText: buildRowSearchText(row),
-      })),
+      sourceRows.map((row, rowIndex) => {
+        const hasContent = rowHasProtectedContent(row);
+
+        return {
+          sheetId: sheet._id,
+          rowIndex,
+          cells: normalizeRowCells(row),
+          searchText: buildRowSearchText(row),
+          ownerId: hasContent ? sheet.createdBy : null,
+          ownerEmail: hasContent ? owner?.email || "" : "",
+          ownerUsername: hasContent ? owner?.username || owner?.email || "" : "",
+        };
+      }),
         { ordered: false }
       );
     } catch (error) {
@@ -586,10 +601,25 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
     .sort({ rowIndex: 1 })
     .lean();
   const rowMap = new Map(rows.map((row) => [row.rowIndex, normalizeRowCells(row.cells)]));
+  const rowOwners = Object.fromEntries(
+    rows
+      .filter((row) => row.ownerId)
+      .map((row) => [
+        row.rowIndex,
+        {
+          userId: row.ownerId.toString(),
+          email: row.ownerEmail || "",
+          username: row.ownerUsername || row.ownerEmail || "",
+        },
+      ])
+  );
 
-  return Array.from({ length: limit }, (_, offset) => (
-    rowMap.get(start + offset) || normalizeRowCells([])
-  ));
+  return {
+    data: Array.from({ length: limit }, (_, offset) => (
+      rowMap.get(start + offset) || normalizeRowCells([])
+    )),
+    rowOwners,
+  };
 };
 
 const getSheetRowCount = async (sheetId) => {
@@ -608,14 +638,73 @@ const ensureSheetRow = async (sheetId, rowIndex) => {
         searchText: "",
       },
     },
-    { new: true, upsert: true }
+    { returnDocument: "after", upsert: true }
   );
 
   row.cells = normalizeRowCells(row.cells);
   return row;
 };
 
-const applyCellPatchesToRows = async (sheetId, patches) => {
+const createRowLockedError = (row) => {
+  const error = new Error(
+    `Row ${row.rowIndex + 1} is locked by ${row.ownerUsername || row.ownerEmail || "another user"}`
+  );
+  error.statusCode = 403;
+  return error;
+};
+
+const ensureRowEditAccess = async (sheet, user, role, rowIndex) => {
+  let row = await ensureSheetRow(sheet._id, rowIndex);
+  const isPrivileged = canBypassRowLocks(role);
+  const isOwner = row.ownerId?.toString() === user.id.toString();
+
+  if (row.ownerId && !isOwner && !isPrivileged) {
+    throw createRowLockedError(row);
+  }
+
+  if (!row.ownerId) {
+    const claimedRow = await SheetRow.findOneAndUpdate(
+      {
+        _id: row._id,
+        $or: [{ ownerId: null }, { ownerId: { $exists: false } }],
+      },
+      {
+        $set: {
+          ownerId: user.id,
+          ownerEmail: user.email,
+          ownerUsername: user.username || user.email,
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    row = claimedRow || await ensureSheetRow(sheet._id, rowIndex);
+
+    if (
+      row.ownerId?.toString() !== user.id.toString() &&
+      !isPrivileged
+    ) {
+      throw createRowLockedError(row);
+    }
+  }
+
+  return row;
+};
+
+const getRowOwnershipMap = (rows = []) => Object.fromEntries(
+  rows
+    .filter((row) => row?.ownerId)
+    .map((row) => [
+      row.rowIndex,
+      {
+        userId: row.ownerId.toString(),
+        email: row.ownerEmail || "",
+        username: row.ownerUsername || row.ownerEmail || "",
+      },
+    ])
+);
+
+const applyCellPatchesToRows = async (sheet, user, role, patches) => {
   const patchesByRow = new Map();
 
   patches.forEach((patch) => {
@@ -632,9 +721,15 @@ const applyCellPatchesToRows = async (sheetId, patches) => {
   });
 
   const updatedCells = [];
+  const updatedRows = [];
 
   for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
-    const row = await ensureSheetRow(sheetId, rowIndex);
+    const editsProtectedColumns = rowPatches.some(
+      (patch) => patch.colIndex <= ROW_LOCK_LAST_COLUMN_INDEX
+    );
+    const row = editsProtectedColumns
+      ? await ensureRowEditAccess(sheet, user, role, rowIndex)
+      : await ensureSheetRow(sheet._id, rowIndex);
 
     rowPatches.forEach((patch) => {
       const currentCell = row.cells[patch.colIndex] || createCell("");
@@ -661,9 +756,10 @@ const applyCellPatchesToRows = async (sheetId, patches) => {
     row.markModified("cells");
     row.markModified("searchText");
     await row.save();
+    updatedRows.push(row);
   }
 
-  return updatedCells;
+  return { updatedCells, rowOwners: getRowOwnershipMap(updatedRows) };
 };
 
 const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value, formula, patches }) => {
@@ -674,10 +770,16 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   const numericRowIndex = Number(rowIndex);
   const numericColIndex = Number(colIndex);
   const newValue = primaryPatch.formula || primaryPatch.value || "";
+  const role = getUserRole(sheet, user.id);
 
   await migrateSheetRowsIfNeeded(sheet);
 
-  const oldRow = await ensureSheetRow(sheet._id, numericRowIndex);
+  const editsProtectedColumns = normalizedPatches.some(
+    (patch) => Number(patch.colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
+  );
+  const oldRow = editsProtectedColumns
+    ? await ensureRowEditAccess(sheet, user, role, numericRowIndex)
+    : await ensureSheetRow(sheet._id, numericRowIndex);
   const oldCell = oldRow.cells?.[numericColIndex] || "";
   const oldValue =
     oldCell && typeof oldCell === "object" ? oldCell.value : oldCell;
@@ -692,7 +794,7 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
     changeType: primaryPatch.formula || String(primaryPatch.value || "").startsWith("=") ? "formula" : "value",
   });
 
-  await applyCellPatchesToRows(sheet._id, normalizedPatches);
+  const { rowOwners } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
@@ -705,7 +807,7 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
 
   await sheet.save();
 
-  return normalizedPatches;
+  return { patches: normalizedPatches, rowOwners };
 };
 
 const createChangeLog = async ({
@@ -1081,6 +1183,9 @@ app.post("/sheet", auth, async (req, res) => {
         rowIndex,
         cells: normalizeRowCells(row),
         searchText: buildRowSearchText(row),
+        ownerId: req.user.id,
+        ownerEmail: req.user.email,
+        ownerUsername: req.user.username || req.user.email,
       }))
       .filter((row) => row.searchText);
 
@@ -1139,16 +1244,17 @@ app.get("/sheet/:id", auth, async (req, res) => {
     await sheet.save();
 
     const totalRows = await getSheetRowCount(req.params.id);
-    const rows = await getRowsForSheet(sheet._id, 0, Math.min(rowLimit, totalRows));
+    const rowsResult = await getRowsForSheet(sheet._id, 0, Math.min(rowLimit, totalRows));
     const sheetObject = sheet.toObject();
-    sheetObject.data = rows;
+    sheetObject.data = rowsResult.data;
+    sheetObject.rowOwners = rowsResult.rowOwners;
 
     sendJson(req, res, {
       sheet: sheetObject,
       role,
       rows: {
         start: 0,
-        count: rows.length,
+        count: rowsResult.data.length,
         total: totalRows,
       },
     });
@@ -1174,12 +1280,17 @@ app.get("/sheet/:id/rows", auth, async (req, res) => {
     await migrateSheetRowsIfNeeded(sheet);
 
     const totalRows = await getSheetRowCount(req.params.id);
-    const rows = await getRowsForSheet(sheet._id, start, Math.max(0, Math.min(limit, totalRows - start)));
+    const rowsResult = await getRowsForSheet(
+      sheet._id,
+      start,
+      Math.max(0, Math.min(limit, totalRows - start))
+    );
 
     sendJson(req, res, {
-      rows,
+      rows: rowsResult.data,
+      rowOwners: rowsResult.rowOwners,
       start,
-      count: rows.length,
+      count: rowsResult.data.length,
       total: totalRows,
     });
   } catch (error) {
@@ -1320,8 +1431,8 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
   try {
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
 
-    if (!sheet || !canEdit(role)) {
-      return res.status(403).json({ message: "You do not have edit permission" });
+    if (!sheet || !canBypassRowLocks(role)) {
+      return res.status(403).json({ message: "Only owner or admin can import rows" });
     }
 
     const start = Math.max(0, Number.parseInt(req.body.start, 10) || 0);
@@ -1333,20 +1444,27 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
 
     if (rows.length > 0) {
       await SheetRow.bulkWrite(
-        rows.map((row, offset) => ({
-          updateOne: {
-            filter: { sheetId: sheet._id, rowIndex: start + offset },
-            update: {
-              $set: {
-                sheetId: sheet._id,
-                rowIndex: start + offset,
-                cells: normalizeRowCells(row),
-                searchText: buildRowSearchText(row),
+        rows.map((row, offset) => {
+          const hasContent = rowHasProtectedContent(row);
+
+          return {
+            updateOne: {
+              filter: { sheetId: sheet._id, rowIndex: start + offset },
+              update: {
+                $set: {
+                  sheetId: sheet._id,
+                  rowIndex: start + offset,
+                  cells: normalizeRowCells(row),
+                  searchText: buildRowSearchText(row),
+                  ownerId: hasContent ? req.user.id : null,
+                  ownerEmail: hasContent ? req.user.email : "",
+                  ownerUsername: hasContent ? req.user.username || req.user.email : "",
+                },
               },
+              upsert: true,
             },
-            upsert: true,
-          },
-        }))
+          };
+        })
       );
     }
 
@@ -1392,7 +1510,7 @@ app.patch("/sheet/:id/cells", auth, async (req, res) => {
       return res.status(400).json({ message: "Invalid cell position" });
     }
 
-    const normalizedPatches = await applyCellPatchesForUser({
+    const editResult = await applyCellPatchesForUser({
       sheet,
       user: req.user,
       rowIndex: targetRowIndex,
@@ -1407,14 +1525,15 @@ app.patch("/sheet/:id/cells", auth, async (req, res) => {
       colIndex: targetColIndex,
       value,
       formula,
-      patches: normalizedPatches,
+      patches: editResult.patches,
+      rowOwners: editResult.rowOwners,
       updatedBy: req.user.email,
     });
 
-    res.json({ ok: true });
+    res.json({ ok: true, rowOwners: editResult.rowOwners });
   } catch (error) {
     console.error("Failed to update cell", error);
-    res.status(500).json({ message: "Failed to update cell" });
+    res.status(error.statusCode || 500).json({ message: error.message || "Failed to update cell" });
   }
 });
 
@@ -1433,7 +1552,9 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
     }
 
     await migrateSheetRowsIfNeeded(sheet);
-    const row = await ensureSheetRow(sheet._id, Number(rowIndex));
+    const row = Number(colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
+      ? await ensureRowEditAccess(sheet, req.user, role, Number(rowIndex))
+      : await ensureSheetRow(sheet._id, Number(rowIndex));
     const cell = row.cells[Number(colIndex)] || createCell("");
     const previousStyle = { ...(cell.style || {}) };
 
@@ -1476,12 +1597,13 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
       rowIndex,
       colIndex,
       style,
+      rowOwners: getRowOwnershipMap([row]),
       updatedBy: req.user.email,
     });
 
-    res.json({ ok: true });
+    res.json({ ok: true, rowOwners: getRowOwnershipMap([row]) });
   } catch (error) {
-    res.status(500).json({ message: "Failed to update cell style" });
+    res.status(error.statusCode || 500).json({ message: error.message || "Failed to update cell style" });
   }
 });
 
@@ -1836,7 +1958,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const normalizedPatches = await applyCellPatchesForUser({
+      const editResult = await applyCellPatchesForUser({
         sheet,
         user: socket.user,
         rowIndex: targetRowIndex,
@@ -1851,15 +1973,16 @@ io.on("connection", (socket) => {
         colIndex: targetColIndex,
         value,
         formula,
-        patches: normalizedPatches,
+        patches: editResult.patches,
+        rowOwners: editResult.rowOwners,
         updatedBy: socket.user.email,
       });
 
-      if (typeof ack === "function") ack({ ok: true });
+      if (typeof ack === "function") ack({ ok: true, rowOwners: editResult.rowOwners });
     } catch (error) {
       console.error("Failed to update cell", error);
-      socket.emit("socket-error", "Failed to update cell");
-      if (typeof ack === "function") ack({ ok: false, message: "Failed to update cell" });
+      socket.emit("socket-error", error.message || "Failed to update cell");
+      if (typeof ack === "function") ack({ ok: false, message: error.message || "Failed to update cell" });
     }
   });
 
@@ -1886,7 +2009,9 @@ io.on("connection", (socket) => {
       }
 
       await migrateSheetRowsIfNeeded(sheet);
-      const row = await ensureSheetRow(sheet._id, Number(rowIndex));
+      const row = Number(colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
+        ? await ensureRowEditAccess(sheet, socket.user, role, Number(rowIndex))
+        : await ensureSheetRow(sheet._id, Number(rowIndex));
       const cell = row.cells[Number(colIndex)] || createCell("");
       const previousStyle = { ...(cell.style || {}) };
       row.cells[Number(colIndex)] = {
@@ -1926,13 +2051,14 @@ io.on("connection", (socket) => {
         rowIndex,
         colIndex,
         style,
+        rowOwners: getRowOwnershipMap([row]),
         updatedBy: socket.user.email,
       });
 
-      if (typeof ack === "function") ack({ ok: true });
+      if (typeof ack === "function") ack({ ok: true, rowOwners: getRowOwnershipMap([row]) });
     } catch (error) {
-      socket.emit("socket-error", "Failed to update cell style");
-      if (typeof ack === "function") ack({ ok: false, message: "Failed to update cell style" });
+      socket.emit("socket-error", error.message || "Failed to update cell style");
+      if (typeof ack === "function") ack({ ok: false, message: error.message || "Failed to update cell style" });
     }
   });
 

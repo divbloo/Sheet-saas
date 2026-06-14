@@ -114,6 +114,7 @@ const visibleErpHeaders = [
 ];
 
 const COLS = 15;
+const ROW_LOCK_LAST_COLUMN_INDEX = 10;
 const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 const MIN_SHEET_ROWS = 5000;
 const IMPORT_BATCH_SIZE = 500;
@@ -204,6 +205,26 @@ function App() {
   const canManage = role === "owner";
   const canManageSheetUsers = role === "owner" || role === "admin";
   const canGrantSheetAdmin = role === "owner";
+  const canBypassRowLocks = role === "owner" || role === "admin";
+  const canEditProtectedRow = (rowIndex) => {
+    if (!canEdit) return false;
+    if (canBypassRowLocks) return true;
+
+    const rowOwner = selectedSheet?.rowOwners?.[rowIndex];
+    return !rowOwner || rowOwner.userId === currentUser?.id;
+  };
+  const canEditCell = (rowIndex, colIndex) => (
+    canEdit && (
+      colIndex > ROW_LOCK_LAST_COLUMN_INDEX ||
+      canEditProtectedRow(rowIndex)
+    )
+  );
+  const getRowLockMessage = (rowIndex) => {
+    const rowOwner = selectedSheet?.rowOwners?.[rowIndex];
+    return rowOwner
+      ? `Row ${rowIndex + 1} is locked by ${rowOwner.username || rowOwner.email || "another user"}`
+      : "You cannot edit this row";
+  };
   const statusText = savingStatus || (
     connectionStatus === "online"
       ? "Online"
@@ -278,6 +299,7 @@ function App() {
   const normalizeSheet = (sheet, options = {}) => ({
     ...sheet,
     data: normalizeData(sheet.data, options.minRows ?? MIN_SHEET_ROWS),
+    rowOwners: { ...(sheet.rowOwners || {}) },
     meta: { ...defaultMeta, ...(sheet.meta || {}) },
     erpOptions: { ...defaultErpOptions, ...(sheet.erpOptions || {}) },
   });
@@ -975,7 +997,22 @@ function App() {
     setSavingStatus("Unsaved changes...");
   };
 
+  const mergeRowOwners = (rowOwners = {}) => {
+    if (!rowOwners || Object.keys(rowOwners).length === 0) return;
+
+    setSelectedSheet((prev) => (
+      prev
+        ? {
+            ...prev,
+            rowOwners: { ...(prev.rowOwners || {}), ...rowOwners },
+          }
+        : prev
+    ));
+  };
+
   const handleSocketSaveResult = (result) => {
+    mergeRowOwners(result?.rowOwners);
+
     if (!result?.ok) {
       setSavingStatus("Unsaved changes...");
       showMessage(result?.message || "Realtime save failed");
@@ -1035,6 +1072,7 @@ function App() {
       return false;
     }
 
+    mergeRowOwners(data.rowOwners);
     setSavingStatus("Saved");
     setTimeout(() => setSavingStatus(""), 1200);
     return true;
@@ -1055,6 +1093,7 @@ function App() {
       return false;
     }
 
+    mergeRowOwners(data.rowOwners);
     setSavingStatus("Saved");
     setTimeout(() => setSavingStatus(""), 1200);
     return true;
@@ -1091,6 +1130,11 @@ function App() {
   };
 
   const queueCellSocketSave = (payload) => {
+    const lockedPatch = getPayloadPatches(payload).find(
+      (patch) => !canEditCell(patch.rowIndex, patch.colIndex)
+    );
+    if (lockedPatch) return;
+
     rememberLocalCellDrafts(payload);
     const pending = pendingCellSaveRef.current;
 
@@ -1135,6 +1179,12 @@ function App() {
       return;
     }
 
+    const lockedPatch = patches.find((patch) => !canEditCell(patch.rowIndex, patch.colIndex));
+    if (lockedPatch) {
+      showMessage(getRowLockMessage(lockedPatch.rowIndex));
+      return;
+    }
+
     setSelectedSheet((prev) => {
       if (!prev) return prev;
 
@@ -1173,6 +1223,11 @@ function App() {
       return;
     }
 
+    if (!canEditCell(rowIndex, colIndex)) {
+      showMessage(getRowLockMessage(rowIndex));
+      return;
+    }
+
     setSelectedSheet((prev) => {
       if (!prev) return prev;
 
@@ -1194,6 +1249,11 @@ function App() {
   };
 
   const updateCell = (rowIndex, colIndex, inputValue) => {
+    if (!canEditCell(rowIndex, colIndex)) {
+      showMessage(getRowLockMessage(rowIndex));
+      return;
+    }
+
     if (colIndex === 1 && rowIndex > 0) {
       showMessage("Description is auto-filled from Item Name");
       return;
@@ -1249,6 +1309,10 @@ function App() {
     if (!selectedCell || !selectedSheet || !canEdit) return;
 
     const { rowIndex, colIndex } = selectedCell;
+    if (!canEditCell(rowIndex, colIndex)) {
+      showMessage(getRowLockMessage(rowIndex));
+      return;
+    }
 
     applyCellStyleLocal(rowIndex, colIndex, { [styleKey]: styleValue }, { queueSave: !socketRef.current });
 
@@ -1275,6 +1339,10 @@ function App() {
     if (!selectedCell || !selectedSheet || !canEdit) return;
 
     const { rowIndex, colIndex } = selectedCell;
+    if (!canEditCell(rowIndex, colIndex)) {
+      showMessage(getRowLockMessage(rowIndex));
+      return;
+    }
 
     applyCellStyleLocal(rowIndex, colIndex, defaultCellStyle, {
       queueSave: !socketRef.current,
@@ -1433,6 +1501,7 @@ function App() {
           ? {
               ...prev,
               data: [...prev.data, ...normalizedRows],
+              rowOwners: { ...(prev.rowOwners || {}), ...(data.rowOwners || {}) },
             }
           : prev
       ));
@@ -1463,6 +1532,7 @@ function App() {
     let loadedRows = selectedSheet.data.length;
     const neededRows = Math.min(targetCount, sheetRowTotal);
     const loadedChunks = [];
+    const loadedRowOwners = {};
 
     while (loadedRows < neededRows) {
       const limit = Math.min(ROW_LOAD_STEP, neededRows - loadedRows);
@@ -1479,6 +1549,7 @@ function App() {
       const normalizedRows = normalizeData(data.rows || [], limit);
 
       loadedChunks.push(...normalizedRows);
+      Object.assign(loadedRowOwners, data.rowOwners || {});
       loadedRows += normalizedRows.length;
       setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
     }
@@ -1489,6 +1560,7 @@ function App() {
           ? {
               ...prev,
               data: [...prev.data, ...loadedChunks],
+              rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
             }
           : prev
       ));
@@ -1775,7 +1847,7 @@ function App() {
 
   const uploadExcel = async (event) => {
     const file = event.target.files?.[0];
-    if (!file || !canEdit || !selectedSheet) return;
+    if (!file || !canBypassRowLocks || !selectedSheet) return;
 
     const buffer = await file.arrayBuffer();
     const XLSX = await loadExcelTools();
@@ -1876,6 +1948,9 @@ function App() {
             ...prev,
             ...normalized,
             data: normalized.data?.length ? normalized.data : prev.data,
+            rowOwners: Object.keys(normalized.rowOwners || {}).length
+              ? normalized.rowOwners
+              : prev.rowOwners,
           }
         : normalized
     ));
@@ -2024,6 +2099,9 @@ function App() {
   const selectedCellStyle = selectedCell && selectedSheet
     ? normalizeCell(selectedSheet.data?.[selectedCell.rowIndex]?.[selectedCell.colIndex]).style
     : defaultCellStyle;
+  const selectedCellCanEdit = selectedCell
+    ? canEditCell(selectedCell.rowIndex, selectedCell.colIndex)
+    : canEdit;
 
   const isBold = selectedCellStyle.fontWeight === "bold";
   const isItalic = selectedCellStyle.fontStyle === "italic";
@@ -2087,7 +2165,7 @@ function App() {
 
     socketRef.current.on("presence-updated", setOnlineUsers);
 
-    socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches }) => {
+    socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches, rowOwners }) => {
       setSelectedSheet((prev) => {
         if (!prev) return prev;
         const incomingPatches = (
@@ -2122,11 +2200,15 @@ function App() {
           prev.analytics?.totalFormulaCells > 0 ||
           incomingPatches.some((patch) => patch.formula || String(patch.value || "").startsWith("="));
 
-        return { ...prev, data: shouldRecalculate ? recalculateData(data) : data };
+        return {
+          ...prev,
+          data: shouldRecalculate ? recalculateData(data) : data,
+          rowOwners: { ...(prev.rowOwners || {}), ...(rowOwners || {}) },
+        };
       });
     });
 
-    socketRef.current.on("cell-style-change", ({ rowIndex, colIndex, style }) => {
+    socketRef.current.on("cell-style-change", ({ rowIndex, colIndex, style, rowOwners }) => {
       setSelectedSheet((prev) => {
         if (!prev) return prev;
         const data = [...prev.data];
@@ -2136,7 +2218,11 @@ function App() {
           ...target,
           style: { ...target.style, ...style },
         };
-        return { ...prev, data };
+        return {
+          ...prev,
+          data,
+          rowOwners: { ...(prev.rowOwners || {}), ...(rowOwners || {}) },
+        };
       });
     });
 
@@ -2676,7 +2762,12 @@ function App() {
             <div className="drawer-section">
               <h4>File & History</h4>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={uploadExcel} hidden />
-              <button onClick={() => fileInputRef.current.click()}>Upload Excel</button>
+              <button
+                disabled={!canBypassRowLocks}
+                onClick={() => fileInputRef.current.click()}
+              >
+                Upload Excel
+              </button>
               <button onClick={exportCSV}>Export CSV</button>
               <button onClick={exportExcel}>Export Excel</button>
               <button onClick={exportPDF}>Export PDF</button>
@@ -2848,6 +2939,8 @@ function App() {
           <div className="formula-bar">
             <span>{selectedCell ? cellAddress(selectedCell.rowIndex, selectedCell.colIndex) : "A1"}</span>
             <input
+              readOnly={!selectedCellCanEdit}
+              title={selectedCell && !selectedCellCanEdit ? getRowLockMessage(selectedCell.rowIndex) : ""}
               value={
                 selectedCell
                   ? normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]).formula ||
@@ -2903,9 +2996,11 @@ function App() {
                 {renderedRows.map((row, rowOffset) => {
                   const rowIndex = virtualRowStart + rowOffset;
                   const rowHeight = getRowHeight(row, rowIndex);
-
                   return (
-                    <tr key={rowIndex} style={{ height: rowHeight }}>
+                    <tr
+                      key={rowIndex}
+                      style={{ height: rowHeight }}
+                    >
                       <th
                         className={
                           selectedRange?.start.row === rowIndex &&
@@ -2932,6 +3027,7 @@ function App() {
                         selectedCell?.rowIndex === rowIndex && selectedCell?.colIndex === colIndex;
                       const isInSelectedRange = isCellInSelectedRange(rowIndex, colIndex);
                       const isCodeColumn = colIndex === 12;
+                      const cellCanEdit = canEditCell(rowIndex, colIndex);
 
                       const dropdownOptions = getDropdownOptions(rowIndex, colIndex);
 
@@ -2943,7 +3039,11 @@ function App() {
                           className={[
                             isInSelectedRange ? "selected-range-cell" : "",
                             isSelected ? "selected-cell" : "",
+                            !cellCanEdit && colIndex <= ROW_LOCK_LAST_COLUMN_INDEX
+                              ? "locked-sheet-cell"
+                              : "",
                           ].filter(Boolean).join(" ")}
+                          title={!cellCanEdit ? getRowLockMessage(rowIndex) : ""}
                           onMouseDown={() => {
                             setSelectedCell({ rowIndex, colIndex });
                             setSelectedRange({
@@ -2968,7 +3068,7 @@ function App() {
                               <input
                                 list={`options-${rowIndex}-${colIndex}`}
                                 value={normalizedCell.value}
-                                disabled={!canEdit}
+                                readOnly={!cellCanEdit}
                                 style={{
                                   ...normalizedCell.style,
                                   width: "100%",
@@ -2992,7 +3092,7 @@ function App() {
                           ) : (
                             <textarea
                               value={normalizedCell.value}
-                              disabled={!canEdit || (colIndex === 1 && rowIndex > 0)}
+                              readOnly={!cellCanEdit || (colIndex === 1 && rowIndex > 0)}
                               style={{
                                 ...normalizedCell.style,
                                 width: "100%",

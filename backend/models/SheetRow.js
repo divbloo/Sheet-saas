@@ -34,6 +34,23 @@ const SheetRowSchema = new mongoose.Schema(
       required: true,
     },
 
+    ownerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+
+    ownerEmail: {
+      type: String,
+      default: "",
+    },
+
+    ownerUsername: {
+      type: String,
+      default: "",
+    },
+
     cells: {
       type: [CellSchema],
       default: [],
