@@ -1,137 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import defaultErpOptions from "./defaultErpOptions.json";
-import "./App.css";
-
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  (import.meta.env.DEV ? "http://localhost:5000" : window.location.origin);
-
-const defaultCellStyle = {
-  fontWeight: "normal",
-  fontStyle: "normal",
-  textDecoration: "none",
-  color: "#111827",
-  backgroundColor: "#ffffff",
-  fontSize: "14px",
-  fontFamily: "Arial",
-  textAlign: "center",
-};
-
-const DEFAULT_ROW_HEIGHT = 36;
-const CELL_HORIZONTAL_PADDING = 16;
-const CELL_VERTICAL_PADDING = 12;
-const DEFAULT_LINE_HEIGHT = 20;
-const COLUMN_WIDTH_PADDING = 28;
-const AVERAGE_CHAR_WIDTH = 7.2;
-const DEFAULT_COLUMN_WIDTHS = {
-  0: 300,
-  1: 300,
-  2: 220,
-  3: 220,
-  4: 145,
-  5: 220,
-  6: 145,
-  7: 82,
-  8: 64,
-  9: 64,
-  10: 220,
-  11: 92,
-  12: 150,
-  13: 92,
-  14: 220,
-};
-const AUTO_COLUMN_LIMITS = {
-  0: { min: 170, max: 300 },
-  1: { min: 170, max: 300 },
-  2: { min: 140, max: 240 },
-  3: { min: 140, max: 240 },
-  4: { min: 110, max: 180 },
-  5: { min: 140, max: 240 },
-  6: { min: 110, max: 180 },
-  7: { min: 64, max: 110 },
-  8: { min: 54, max: 76 },
-  9: { min: 54, max: 76 },
-  10: { min: 110, max: 165 },
-  11: { min: 72, max: 110 },
-  12: { min: 90, max: 170 },
-  13: { min: 72, max: 110 },
-  14: { min: 150, max: 260 },
-};
-
-const defaultMeta = {
-  colWidths: DEFAULT_COLUMN_WIDTHS,
-  rowHeights: {},
-  merges: [],
-  versions: [],
-};
-
-const rowPalette = [
-  {
-    backgroundColor: "#e0f2fe",
-    color: "#075985",
-  },
-  {
-    backgroundColor: "#ccfbf1",
-    color: "#115e59",
-  },
-];
-
-const erpArabicHeaders = [
-  "اسم الصنف",
-  "الوصف",
-  "المجموعة الرئيسية",
-  "المجموعة الفرعية",
-  "المجموعة تحت الفرعية",
-  "المجموعة المساعدة",
-  "المجموعة التفصيلية",
-  "وحدة القياس",
-  "الصلاحية",
-  "التسلسل",
-  "ملاحظات",
-  "التأكيد الأول",
-  "الكود",
-  "التأكيد الثاني",
-  "التأكيد الثالث",
-];
-
-const visibleErpHeaders = [
-  "اسم الصنف",
-  "الوصف",
-  "المجموعة الرئيسية",
-  "المجموعة الفرعية",
-  "المجموعة تحت الفرعية",
-  "المجموعة المساعدة",
-  "المجموعة التفصيلية",
-  "وحدة القياس",
-  "الصلاحية",
-  "التسلسل",
-  "ملاحظات",
-  "التأكيد الأول",
-  "الكود",
-  "التأكيد الثاني",
-  "Modified Description",
-];
-
-const COLS = 15;
-const ROW_LOCK_LAST_COLUMN_INDEX = 10;
-const LEGACY_PACKAGE_COLUMN_INDEX = 8;
-const MIN_SHEET_ROWS = 5000;
-const IMPORT_BATCH_SIZE = 500;
-const EXPORT_ROW_BATCH_SIZE = 500;
-const INITIAL_VISIBLE_ROWS = 50;
-const ROW_LOAD_STEP = 50;
-const CONTEXT_MENU_MARGIN = 8;
-const CELL_SAVE_DEBOUNCE_MS = 400;
-const VIRTUAL_ROW_BUFFER = 12;
-const VIRTUAL_ROW_WINDOW = 90;
-const AUTO_FIT_SAMPLE_ROWS = 60;
-
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-const normalizeRowTotal = (...values) => Math.max(
+import {
+  API_URL,
+  AUTO_COLUMN_LIMITS,
+  AUTO_FIT_SAMPLE_ROWS,
+  AUTO_REFRESH_INTERVAL_MS,
+  AVERAGE_CHAR_WIDTH,
+  CELL_HORIZONTAL_PADDING,
+  CELL_SAVE_DEBOUNCE_MS,
+  CELL_VERTICAL_PADDING,
+  COLS,
+  COLUMN_WIDTH_PADDING,
+  CONTEXT_MENU_MARGIN,
+  DEFAULT_LINE_HEIGHT,
+  DEFAULT_ROW_HEIGHT,
+  EXPORT_ROW_BATCH_SIZE,
+  IMPORT_BATCH_SIZE,
+  INITIAL_VISIBLE_ROWS,
+  LEGACY_PACKAGE_COLUMN_INDEX,
   MIN_SHEET_ROWS,
-  ...values.map((value) => Number(value) || 0)
-);
+  ROW_LOAD_STEP,
+  ROW_LOCK_LAST_COLUMN_INDEX,
+  VIRTUAL_ROW_BUFFER,
+  VIRTUAL_ROW_WINDOW,
+  clamp,
+  defaultCellStyle,
+  defaultMeta,
+  erpArabicHeaders,
+  normalizeRowTotal,
+  rowPalette,
+  visibleErpHeaders,
+} from "./spreadsheetConfig";
+import "./App.css";
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -2119,6 +2020,40 @@ function App() {
   const renderedRows = selectedSheet?.data?.slice(virtualRowStart, virtualRowEnd) || [];
   const topSpacerHeight = virtualRowStart * DEFAULT_ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(0, visibleRows - virtualRowEnd) * DEFAULT_ROW_HEIGHT;
+
+  useEffect(() => {
+    if (!token) return;
+
+    const refreshData = async () => {
+      if (document.visibilityState === "hidden") return;
+
+      flushPendingCellSave();
+      const activeSheetId = selectedSheetRef.current?._id;
+
+      try {
+        await Promise.all([
+          loadMe(),
+          loadWorkspaces(),
+          loadSheets(),
+          loadAnalytics(),
+          activeSheetId ? loadErpOptions(activeSheetId) : Promise.resolve(),
+        ]);
+        setSavingStatus((current) => current === "Unsaved changes..." ? current : "Refreshed");
+        window.setTimeout(() => {
+          setSavingStatus((current) => current === "Refreshed" ? "" : current);
+        }, 1200);
+      } catch {
+        setConnectionStatus((current) => current === "online" ? current : "offline");
+      }
+    };
+
+    const refreshTimer = window.setInterval(() => {
+      void refreshData();
+    }, AUTO_REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(refreshTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, selectedWorkspaceId]);
 
   useEffect(() => {
     selectedSheetRef.current = selectedSheet;
