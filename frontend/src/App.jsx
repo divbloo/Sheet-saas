@@ -1074,6 +1074,25 @@ function App() {
     );
   };
 
+  const mergeRowsAtStart = (currentRows, incomingRows, start) => {
+    const nextRows = [...currentRows];
+
+    incomingRows.forEach((row, index) => {
+      nextRows[start + index] = row;
+    });
+
+    return nextRows;
+  };
+
+  const patchMatchesCell = (cell, patch) => {
+    const normalizedCell = normalizeCell(cell);
+
+    return (
+      String(normalizedCell.value ?? "") === String(patch.value ?? "") &&
+      (normalizedCell.formula || "") === (patch.formula || "")
+    );
+  };
+
   const applyCellPatchesLocal = (patches, options = {}) => {
     if (!canEdit) {
       showMessage("Viewer access: you cannot edit this sheet");
@@ -1394,20 +1413,24 @@ function App() {
         return;
       }
 
-      const expectedRowCount = Math.min(ROW_LOAD_STEP, sheetRowTotal - loadedRows);
+      const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
+      const expectedRowCount = Math.min(ROW_LOAD_STEP, sheetRowTotal - responseStart);
       const normalizedRows = normalizeData(data.rows || [], expectedRowCount);
 
-      setSelectedSheet((prev) => (
-        prev
-          ? {
-              ...prev,
-              data: [...prev.data, ...normalizedRows],
-              rowOwners: { ...(prev.rowOwners || {}), ...(data.rowOwners || {}) },
-            }
-          : prev
-      ));
+      setSelectedSheet((prev) => {
+        if (!prev || prev._id !== selectedSheet._id) return prev;
+
+        return {
+          ...prev,
+          data: mergeRowsAtStart(prev.data, normalizedRows, responseStart),
+          rowOwners: { ...(prev.rowOwners || {}), ...(data.rowOwners || {}) },
+        };
+      });
       setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
-      setVisibleRows((count) => Math.min(count + normalizedRows.length, loadedRows + normalizedRows.length));
+      setVisibleRows((count) => Math.min(
+        Math.max(count + ROW_LOAD_STEP, responseStart + normalizedRows.length),
+        normalizeRowTotal(data.total, sheetRowTotal)
+      ));
     } catch {
       showMessage("Failed to load rows");
     } finally {
@@ -1447,24 +1470,30 @@ function App() {
         break;
       }
 
+      const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
       const normalizedRows = normalizeData(data.rows || [], limit);
 
-      loadedChunks.push(...normalizedRows);
+      loadedChunks.push({ start: responseStart, rows: normalizedRows });
       Object.assign(loadedRowOwners, data.rowOwners || {});
-      loadedRows += normalizedRows.length;
+      loadedRows = responseStart + normalizedRows.length;
       setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
     }
 
     if (loadedChunks.length > 0) {
-      setSelectedSheet((prev) => (
-        prev
-          ? {
-              ...prev,
-              data: [...prev.data, ...loadedChunks],
-              rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
-            }
-          : prev
-      ));
+      setSelectedSheet((prev) => {
+        if (!prev || prev._id !== selectedSheet._id) return prev;
+
+        const nextData = loadedChunks.reduce(
+          (rows, chunk) => mergeRowsAtStart(rows, chunk.rows, chunk.start),
+          prev.data
+        );
+
+        return {
+          ...prev,
+          data: nextData,
+          rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
+        };
+      });
     }
 
     setRowsLoading(false);
@@ -2108,7 +2137,8 @@ function App() {
             ? patches
             : [{ rowIndex, colIndex, value, formula }]
         ).filter((patch) => (
-          !localCellDraftsRef.current.has(getCellPatchKey(prev._id, patch))
+          !localCellDraftsRef.current.has(getCellPatchKey(prev._id, patch)) &&
+          !patchMatchesCell(prev.data?.[patch.rowIndex]?.[patch.colIndex], patch)
         ));
 
         if (incomingPatches.length === 0) return prev;
