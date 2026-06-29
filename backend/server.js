@@ -631,6 +631,16 @@ const getSheetRowCount = async (sheetId) => {
 };
 
 const getLastDataRowIndex = async (sheetId) => {
+  const indexedRow = await SheetRow.findOne({
+    sheetId,
+    searchText: { $exists: true, $ne: "" },
+  })
+    .sort({ rowIndex: -1 })
+    .select("rowIndex")
+    .lean();
+
+  if (indexedRow) return indexedRow.rowIndex;
+
   const totalRows = await getSheetRowCount(sheetId);
   const pageSize = 500;
 

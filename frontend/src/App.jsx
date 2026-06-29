@@ -15,6 +15,7 @@ import {
   CONTEXT_MENU_MARGIN,
   DEFAULT_LINE_HEIGHT,
   DEFAULT_ROW_HEIGHT,
+  DEFAULT_COLUMN_WIDTHS,
   EXPORT_ROW_BATCH_SIZE,
   IMPORT_BATCH_SIZE,
   INITIAL_VISIBLE_ROWS,
@@ -99,6 +100,7 @@ function App() {
   const pendingCellSaveRef = useRef(null);
   const localCellDraftsRef = useRef(new Map());
   const rowsLoadingRef = useRef(false);
+  const scrollFrameRef = useRef(null);
   const fileInputRef = useRef(null);
   const contextMenuRef = useRef(null);
   const gridRef = useRef(null);
@@ -252,11 +254,7 @@ function App() {
   };
 
   const getColumnWidth = (colIndex) => {
-    if (colIndex === 0 || colIndex === 1) {
-      return getAutoColumnWidth(colIndex, selectedSheet?.data?.slice(0, visibleRows) || []);
-    }
-
-    return autoColumnWidths[colIndex] || getAutoColumnWidth(colIndex, selectedSheet?.data?.slice(0, AUTO_FIT_SAMPLE_ROWS) || []);
+    return autoColumnWidths[colIndex] || DEFAULT_COLUMN_WIDTHS[colIndex] || 120;
   };
 
   const getTextLineHeight = (cellStyle = {}) => {
@@ -1460,9 +1458,19 @@ function App() {
 
   const handleGridScroll = (event) => {
     const grid = event.currentTarget;
-    setGridScrollTop(grid.scrollTop);
+    const nextScrollTop = grid.scrollTop;
+    const nearBottom = grid.scrollHeight - nextScrollTop - grid.clientHeight <= DEFAULT_ROW_HEIGHT * 4;
 
-    if (grid.scrollHeight - grid.scrollTop - grid.clientHeight <= DEFAULT_ROW_HEIGHT * 4) {
+    if (scrollFrameRef.current) {
+      window.cancelAnimationFrame(scrollFrameRef.current);
+    }
+
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      setGridScrollTop(nextScrollTop);
+      scrollFrameRef.current = null;
+    });
+
+    if (nearBottom) {
       void loadMoreRows();
     }
   };
@@ -2285,6 +2293,14 @@ function App() {
     return () => clearTimeout(saveTimerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSheet?.meta, savingStatus, canEdit]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const flushOnPageHide = () => flushPendingCellSave();
