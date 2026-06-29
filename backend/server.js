@@ -633,7 +633,7 @@ const getSheetRowCount = async (sheetId) => {
 const getLastDataRowIndex = async (sheetId) => {
   const indexedRow = await SheetRow.findOne({
     sheetId,
-    searchText: { $exists: true, $ne: "" },
+    searchText: { $regex: "\\S" },
   })
     .sort({ rowIndex: -1 })
     .select("rowIndex")

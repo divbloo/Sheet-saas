@@ -27,3 +27,10 @@ test("buildRowSearchText includes cell values and formulas", () => {
   assert.match(text, /item a/);
   assert.match(text, /=sum\(a1:a2\)/);
 });
+
+
+test("buildRowSearchText returns empty text for empty rows", () => {
+  const text = buildRowSearchText([]);
+
+  assert.equal(text, "");
+});

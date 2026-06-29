@@ -46,6 +46,7 @@ const buildRowSearchText = (cells = []) => {
   return normalizeRowCells(cells)
     .map((cell) => `${cell.value ?? ""} ${cell.formula || ""}`)
     .join(" ")
+    .trim()
     .toLowerCase();
 };
 
