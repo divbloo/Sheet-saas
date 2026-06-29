@@ -662,11 +662,37 @@ function App() {
     setMenuOpen(false);
   };
 
-  const buildInitialSheetRows = (rows, start) => {
+  const loadRowsBeforeStart = async (sheetId, start) => {
+    if (!start) return [];
+
+    const loadedRows = [];
+    let nextStart = 0;
+
+    while (nextStart < start) {
+      const limit = Math.min(EXPORT_ROW_BATCH_SIZE, start - nextStart);
+      const res = await authFetch(
+        API_URL + "/sheet/" + sheetId + "/rows?start=" + nextStart + "&limit=" + limit
+      );
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.message || "Failed to load previous rows");
+      }
+
+      const responseStart = Number.isInteger(data.start) ? data.start : nextStart;
+      const normalizedRows = normalizeData(data.rows || [], limit);
+      loadedRows.splice(responseStart, normalizedRows.length, ...normalizedRows);
+      nextStart = responseStart + normalizedRows.length;
+    }
+
+    return loadedRows;
+  };
+
+  const buildInitialSheetRows = async (sheetId, rows, start) => {
     if (!start) return rows;
 
-    const blankRows = normalizeData([], start);
-    return mergeRowsAtStart(blankRows, rows, start);
+    const leadingRows = await loadRowsBeforeStart(sheetId, start);
+    return mergeRowsAtStart(leadingRows, rows, start);
   };
 
   const openSheet = async (id) => {
@@ -687,7 +713,7 @@ function App() {
     const normalized = normalizeSheet(data.sheet, { minRows: 0 });
     const rowStart = Number(data.rows?.start || 0);
     const lastDataRowIndex = Number(data.rows?.lastDataRowIndex || 0);
-    const focusedRows = buildInitialSheetRows(normalized.data, rowStart);
+    const focusedRows = await buildInitialSheetRows(id, normalized.data, rowStart);
     const focusedSheet = { ...normalized, data: focusedRows };
     const totalRows = normalizeRowTotal(data.rows?.total, focusedRows.length);
     const initialVisibleRows = Math.min(totalRows, Math.max(INITIAL_VISIBLE_ROWS, rowStart + normalized.data.length));
