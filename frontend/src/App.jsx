@@ -101,6 +101,7 @@ function App() {
   const rowsLoadingRef = useRef(false);
   const fileInputRef = useRef(null);
   const contextMenuRef = useRef(null);
+  const gridRef = useRef(null);
 
   const canEdit = role === "owner" || role === "admin" || role === "editor";
   const canManage = role === "owner";
@@ -663,6 +664,13 @@ function App() {
     setMenuOpen(false);
   };
 
+  const buildInitialSheetRows = (rows, start) => {
+    if (!start) return rows;
+
+    const blankRows = normalizeData([], start);
+    return mergeRowsAtStart(blankRows, rows, start);
+  };
+
   const openSheet = async (id) => {
     flushPendingCellSave();
 
@@ -670,7 +678,7 @@ function App() {
       socketRef.current.emit("leave-sheet", selectedSheet._id);
     }
 
-    const res = await authFetch(API_URL + "/sheet/" + id + "?rowLimit=" + INITIAL_VISIBLE_ROWS);
+    const res = await authFetch(API_URL + "/sheet/" + id + "?rowLimit=" + INITIAL_VISIBLE_ROWS + "&focus=lastData");
     const data = await res.json();
 
     if (!res.ok) {
@@ -679,19 +687,30 @@ function App() {
     }
 
     const normalized = normalizeSheet(data.sheet, { minRows: 0 });
+    const rowStart = Number(data.rows?.start || 0);
+    const lastDataRowIndex = Number(data.rows?.lastDataRowIndex || 0);
+    const focusedRows = buildInitialSheetRows(normalized.data, rowStart);
+    const focusedSheet = { ...normalized, data: focusedRows };
+    const totalRows = normalizeRowTotal(data.rows?.total, focusedRows.length);
+    const initialVisibleRows = Math.min(totalRows, Math.max(INITIAL_VISIBLE_ROWS, rowStart + normalized.data.length));
+    const initialScrollTop = Math.max(0, lastDataRowIndex * DEFAULT_ROW_HEIGHT);
 
-    setSelectedSheet(normalized);
-    setSheetRowTotal(normalizeRowTotal(data.rows?.total, normalized.data.length));
+    setSelectedSheet(focusedSheet);
+    setSheetRowTotal(totalRows);
     setErpOptions(normalized.erpOptions || defaultErpOptions);
     setRole(data.role);
     setSelectedCell(null);
     setSelectedRange(null);
-    setGridScrollTop(0);
-    setVisibleRows(INITIAL_VISIBLE_ROWS);
+    setGridScrollTop(initialScrollTop);
+    setVisibleRows(initialVisibleRows);
     setCurrentPage("sheet");
     setMenuOpen(false);
 
     await loadErpOptions(id);
+
+    window.requestAnimationFrame(() => {
+      if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
+    });
 
     if (socketRef.current?.connected) {
       socketRef.current.emit("join-sheet", id);
@@ -2923,7 +2942,7 @@ function App() {
             </div>
           </div>
 
-          <div className="grid-wrap-full" onScroll={handleGridScroll}>
+          <div className="grid-wrap-full" ref={gridRef} onScroll={handleGridScroll}>
             <table className="sheet-table-full">
               <colgroup>
                 <col className="corner-col" />

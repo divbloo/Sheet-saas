@@ -161,6 +161,9 @@ const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_CO
   );
 };
 
+const rowHasContent = (row = []) => normalizeRowCells(row)
+  .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
+
 const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
@@ -625,6 +628,27 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
 const getSheetRowCount = async (sheetId) => {
   const lastRow = await SheetRow.findOne({ sheetId }).sort({ rowIndex: -1 }).select("rowIndex").lean();
   return Math.max(DEFAULT_SHEET_ROWS, lastRow ? lastRow.rowIndex + 1 : 0);
+};
+
+const getLastDataRowIndex = async (sheetId) => {
+  const totalRows = await getSheetRowCount(sheetId);
+  const pageSize = 500;
+
+  for (let end = totalRows; end > 0; end -= pageSize) {
+    const start = Math.max(0, end - pageSize);
+    const rows = await SheetRow.find({
+      sheetId,
+      rowIndex: { $gte: start, $lt: end },
+    })
+      .sort({ rowIndex: -1 })
+      .select("rowIndex cells")
+      .lean();
+
+    const lastDataRow = rows.find((row) => rowHasContent(row.cells));
+    if (lastDataRow) return lastDataRow.rowIndex;
+  }
+
+  return 0;
 };
 
 const ensureSheetRow = async (sheetId, rowIndex) => {
@@ -1229,6 +1253,7 @@ app.get("/sheet/:id", auth, async (req, res) => {
       Number.parseInt(req.query.rowLimit, 10) || DEFAULT_ROW_PAGE_SIZE,
       MAX_ROW_PAGE_SIZE
     );
+    const focusLastDataRow = req.query.focus === "lastData";
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
 
     if (!sheet || !canRead(role)) {
@@ -1244,7 +1269,15 @@ app.get("/sheet/:id", auth, async (req, res) => {
     await sheet.save();
 
     const totalRows = await getSheetRowCount(req.params.id);
-    const rowsResult = await getRowsForSheet(sheet._id, 0, Math.min(rowLimit, totalRows));
+    const lastDataRowIndex = focusLastDataRow ? await getLastDataRowIndex(sheet._id) : 0;
+    const rowStart = focusLastDataRow
+      ? Math.max(0, Math.min(lastDataRowIndex, totalRows - 1) - Math.floor(rowLimit / 2))
+      : Math.max(0, Number.parseInt(req.query.rowStart, 10) || 0);
+    const rowsResult = await getRowsForSheet(
+      sheet._id,
+      rowStart,
+      Math.max(0, Math.min(rowLimit, totalRows - rowStart))
+    );
     const sheetObject = sheet.toObject();
     sheetObject.data = rowsResult.data;
     sheetObject.rowOwners = rowsResult.rowOwners;
@@ -1253,9 +1286,10 @@ app.get("/sheet/:id", auth, async (req, res) => {
       sheet: sheetObject,
       role,
       rows: {
-        start: 0,
+        start: rowStart,
         count: rowsResult.data.length,
         total: totalRows,
+        lastDataRowIndex,
       },
     });
   } catch (error) {
