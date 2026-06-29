@@ -915,6 +915,20 @@ function App() {
     setSavingStatus("Unsaved changes...");
   };
 
+  const applyRowOwnerUpdates = (currentOwners = {}, rowOwners = {}) => {
+    const nextOwners = { ...currentOwners };
+
+    Object.entries(rowOwners || {}).forEach(([rowIndex, owner]) => {
+      if (owner) {
+        nextOwners[rowIndex] = owner;
+      } else {
+        delete nextOwners[rowIndex];
+      }
+    });
+
+    return nextOwners;
+  };
+
   const mergeRowOwners = (rowOwners = {}) => {
     if (!rowOwners || Object.keys(rowOwners).length === 0) return;
 
@@ -922,7 +936,7 @@ function App() {
       prev
         ? {
             ...prev,
-            rowOwners: { ...(prev.rowOwners || {}), ...rowOwners },
+            rowOwners: applyRowOwnerUpdates(prev.rowOwners, rowOwners),
           }
         : prev
     ));
@@ -2195,7 +2209,7 @@ function App() {
         return {
           ...prev,
           data: shouldRecalculate ? recalculateData(data) : data,
-          rowOwners: { ...(prev.rowOwners || {}), ...(rowOwners || {}) },
+          rowOwners: applyRowOwnerUpdates(prev.rowOwners, rowOwners),
         };
       });
     });
@@ -2213,7 +2227,7 @@ function App() {
         return {
           ...prev,
           data,
-          rowOwners: { ...(prev.rowOwners || {}), ...(rowOwners || {}) },
+          rowOwners: applyRowOwnerUpdates(prev.rowOwners, rowOwners),
         };
       });
     });

@@ -727,14 +727,16 @@ const ensureRowEditAccess = async (sheet, user, role, rowIndex) => {
 
 const getRowOwnershipMap = (rows = []) => Object.fromEntries(
   rows
-    .filter((row) => row?.ownerId)
+    .filter(Boolean)
     .map((row) => [
       row.rowIndex,
-      {
-        userId: row.ownerId.toString(),
-        email: row.ownerEmail || "",
-        username: row.ownerUsername || row.ownerEmail || "",
-      },
+      row.ownerId
+        ? {
+            userId: row.ownerId.toString(),
+            email: row.ownerEmail || "",
+            username: row.ownerUsername || row.ownerEmail || "",
+          }
+        : null,
     ])
 );
 
@@ -787,8 +789,18 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     });
 
     row.searchText = buildRowSearchText(row.cells);
+
+    if (editsProtectedColumns && !rowHasProtectedContent(row.cells)) {
+      row.ownerId = null;
+      row.ownerEmail = "";
+      row.ownerUsername = "";
+    }
+
     row.markModified("cells");
     row.markModified("searchText");
+    row.markModified("ownerId");
+    row.markModified("ownerEmail");
+    row.markModified("ownerUsername");
     await row.save();
     updatedRows.push(row);
   }
