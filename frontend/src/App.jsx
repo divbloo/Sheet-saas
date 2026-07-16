@@ -39,6 +39,24 @@ import {
 } from "./spreadsheetConfig";
 import "./App.css";
 
+const TAX_EXPORT_HEADERS = [
+  "CodeType",
+  "ItemCode",
+  "CodeName",
+  "CodeName2Ar",
+  "Description",
+  "DescriptionAr",
+  "ActiveFrom",
+  "ActiveTo",
+  "GPCItemLinked",
+  "EGSRelatedCode",
+];
+
+const TAX_EXPORT_COLUMN_WIDTHS = [14.73, 11.45, 12.54, 15.54, 42.73, 32.45, 30.45, 26.73, 42.18, 36.27];
+const TAX_ITEM_NAME_COLUMN_INDEX = 0;
+const TAX_ITEM_CODE_COLUMN_INDEX = 12;
+const TAX_ACTIVE_FROM_DAYS_AGO = 5;
+
 function App() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
@@ -1608,6 +1626,27 @@ function App() {
     return /^\d+$/.test(text) ? Number(text) : NaN;
   };
 
+  const getCairoDateDaysAgo = (daysAgo) => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: CAIRO_TIMEZONE,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    }).formatToParts(new Date());
+    const year = Number(parts.find((part) => part.type === "year")?.value || 1970);
+    const month = Number(parts.find((part) => part.type === "month")?.value || 1);
+    const day = Number(parts.find((part) => part.type === "day")?.value || 1);
+    const date = new Date(year, month - 1, day, 12, 0, 0, 0);
+
+    date.setDate(date.getDate() - daysAgo);
+    return date;
+  };
+
+  const getCellExportText = (row, colIndex) => {
+    const normalized = normalizeCell(row?.[colIndex]);
+    return String(normalized.value || normalized.formula || "").trim();
+  };
+
   const getExportRangeBounds = () => {
     if (!selectedSheet) return null;
 
@@ -1919,6 +1958,65 @@ function App() {
     });
 
     doc.save(`${selectedSheet.name || "sheet"}-${range.label}.pdf`);
+  };
+
+  const exportTaxExcel = async () => {
+    if (!selectedSheet) return;
+
+    const range = getExportRangeBounds();
+    if (!range) return;
+
+    const XLSX = await loadExcelTools();
+    const exportRows = await loadRowsForExportRange(range);
+    const activeFrom = getCairoDateDaysAgo(TAX_ACTIVE_FROM_DAYS_AGO);
+    const taxRows = exportRows
+      .map((row) => {
+        const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
+        const itemName = getCellExportText(row, TAX_ITEM_NAME_COLUMN_INDEX);
+
+        if (!itemCode && !itemName) return null;
+
+        return ["EGS", itemCode, itemName, itemName, itemName, itemName, activeFrom, null, null, null];
+      })
+      .filter(Boolean);
+
+    if (!taxRows.length) {
+      showMessage("No item rows found in selected range");
+      return;
+    }
+
+    const worksheet = XLSX.utils.aoa_to_sheet([TAX_EXPORT_HEADERS, ...taxRows], { cellDates: true });
+    worksheet["!cols"] = TAX_EXPORT_COLUMN_WIDTHS.map((width) => ({ width }));
+    worksheet["!ref"] = XLSX.utils.encode_range({
+      s: { r: 0, c: 0 },
+      e: { r: taxRows.length, c: TAX_EXPORT_HEADERS.length - 1 },
+    });
+
+    taxRows.forEach((_, rowIndex) => {
+      const sheetRowIndex = rowIndex + 1;
+      const itemCodeAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 1 });
+      const activeFromAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 6 });
+      const activeToAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 7 });
+
+      worksheet[itemCodeAddress] = {
+        ...(worksheet[itemCodeAddress] || {}),
+        t: "s",
+        z: "@",
+      };
+      worksheet[activeFromAddress] = {
+        t: "d",
+        v: activeFrom,
+        z: "m/d/yy",
+      };
+      worksheet[activeToAddress] = {
+        t: "z",
+        z: "m/d/yy",
+      };
+    });
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "DataEntry");
+    XLSX.writeFile(workbook, `tax-codes-${range.label}.xlsx`, { cellDates: true });
   };
 
   const uploadExcel = async (event) => {
@@ -2917,6 +3015,7 @@ function App() {
               </div>
               <button onClick={exportExcel}>Export Excel</button>
               <button onClick={exportPDF}>Export PDF</button>
+              <button onClick={exportTaxExcel}>Export Taxes Excel</button>
               <button onClick={saveVersion}>Save Version</button>
               <button onClick={showAllChanges}>Show All Changes</button>
               <button onClick={renameSheet}>Rename Sheet</button>
