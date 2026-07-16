@@ -62,6 +62,7 @@ function App() {
   const [selectedRange, setSelectedRange] = useState(null);
   const [visibleRows, setVisibleRows] = useState(INITIAL_VISIBLE_ROWS);
   const [sheetRowTotal, setSheetRowTotal] = useState(0);
+  const [exportRange, setExportRange] = useState({ from: "1", to: "" });
   const [rowsLoading, setRowsLoading] = useState(false);
   const [gridScrollTop, setGridScrollTop] = useState(0);
   const [role, setRole] = useState(null);
@@ -1602,36 +1603,70 @@ function App() {
     setRowsLoading(false);
   };
 
-  const loadAllRowsForExport = async () => {
-    if (!selectedSheet) return [];
+  const parseExportRowNumber = (value, fallback) => {
+    const text = String(value ?? "").trim() || String(fallback);
+    return /^\d+$/.test(text) ? Number(text) : NaN;
+  };
 
-    const allRows = [...selectedSheet.data];
-    let loadedRows = allRows.length;
+  const getExportRangeBounds = () => {
+    if (!selectedSheet) return null;
 
-    while (loadedRows < sheetRowTotal) {
-      const limit = Math.min(EXPORT_ROW_BATCH_SIZE, sheetRowTotal - loadedRows);
+    const totalRows = Math.max(sheetRowTotal || 0, selectedSheet.data?.length || 0);
+    if (!totalRows) {
+      showMessage("No rows available to export");
+      return null;
+    }
+
+    const fromRow = parseExportRowNumber(exportRange.from, 1);
+    const toRow = parseExportRowNumber(exportRange.to, totalRows);
+
+    if (
+      !Number.isInteger(fromRow) ||
+      !Number.isInteger(toRow) ||
+      fromRow < 1 ||
+      toRow < fromRow ||
+      toRow > totalRows
+    ) {
+      showMessage(`Choose export rows between 1 and ${totalRows}`);
+      return null;
+    }
+
+    return {
+      fromRow,
+      toRow,
+      startIndex: fromRow - 1,
+      endIndex: toRow,
+      label: `rows-${fromRow}-to-${toRow}`,
+    };
+  };
+
+  const loadRowsForExportRange = async (range) => {
+    if (!selectedSheet || !range) return [];
+
+    const expectedRows = range.endIndex - range.startIndex;
+    const rows = [];
+    let loadedRows = 0;
+
+    while (loadedRows < expectedRows) {
+      const requestStart = range.startIndex + loadedRows;
+      const limit = Math.min(EXPORT_ROW_BATCH_SIZE, expectedRows - loadedRows);
       const res = await authFetch(
-        API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + limit
+        API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + requestStart + "&limit=" + limit
       );
       const data = await res.json();
 
       if (!res.ok) {
         showMessage(data.message || "Failed to load rows for export");
-        break;
+        return [];
       }
 
-      const normalizedRows = normalizeData(data.rows || [], limit);
+      const normalizedRows = normalizeData(data.rows || [], limit).slice(0, limit);
 
-      allRows.push(...normalizedRows);
+      rows.push(...normalizedRows);
       loadedRows += normalizedRows.length;
     }
 
-    if (allRows.length > selectedSheet.data.length) {
-      setSelectedSheet((prev) => (prev ? { ...prev, data: allRows } : prev));
-      setVisibleRows((count) => Math.max(count, Math.min(allRows.length, sheetRowTotal)));
-    }
-
-    return allRows;
+    return rows.slice(0, expectedRows);
   };
 
   const clearSelectedCell = () => {
@@ -1825,9 +1860,13 @@ function App() {
   const exportExcel = async () => {
     if (!selectedSheet) return;
 
+    const range = getExportRangeBounds();
+    if (!range) return;
+
     const XLSX = await loadExcelTools();
-    const allRows = await loadAllRowsForExport();
-    const exportRows = allRows.length > 0 ? allRows : selectedSheet.data;
+    const exportRows = await loadRowsForExportRange(range);
+    if (!exportRows.length) return;
+
     const rows = exportRows.map((row) =>
       row.slice(0, COLS).map((cell) => {
         const normalized = normalizeCell(cell);
@@ -1856,16 +1895,20 @@ function App() {
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
-    XLSX.writeFile(workbook, (selectedSheet.name || "sheet") + ".xlsx");
+    XLSX.writeFile(workbook, `${selectedSheet.name || "sheet"}-${range.label}.xlsx`);
   };
 
   const exportPDF = async () => {
     if (!selectedSheet) return;
 
+    const range = getExportRangeBounds();
+    if (!range) return;
+
     const { jsPDF, autoTable } = await loadPdfTools();
     const doc = new jsPDF({ orientation: "landscape" });
-    const allRows = await loadAllRowsForExport();
-    const exportRows = allRows.length > 0 ? allRows : selectedSheet.data;
+    const exportRows = await loadRowsForExportRange(range);
+    if (!exportRows.length) return;
+
     const rows = exportRows.map((row) =>
       row.slice(0, COLS).map((cell) => normalizeCell(cell).value)
     );
@@ -1875,7 +1918,7 @@ function App() {
       body: rows,
     });
 
-    doc.save((selectedSheet.name || "sheet") + ".pdf");
+    doc.save(`${selectedSheet.name || "sheet"}-${range.label}.pdf`);
   };
 
   const uploadExcel = async (event) => {
@@ -2845,6 +2888,33 @@ function App() {
                 Upload Excel
               </button>
               <button onClick={exportCSV}>Export CSV</button>
+              <div className="export-range-controls">
+                <label>
+                  <span>From row</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={sheetRowTotal || selectedSheet.data.length}
+                    value={exportRange.from}
+                    onChange={(event) =>
+                      setExportRange((range) => ({ ...range, from: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>To row</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={sheetRowTotal || selectedSheet.data.length}
+                    placeholder={String(sheetRowTotal || selectedSheet.data.length)}
+                    value={exportRange.to}
+                    onChange={(event) =>
+                      setExportRange((range) => ({ ...range, to: event.target.value }))
+                    }
+                  />
+                </label>
+              </div>
               <button onClick={exportExcel}>Export Excel</button>
               <button onClick={exportPDF}>Export PDF</button>
               <button onClick={saveVersion}>Save Version</button>

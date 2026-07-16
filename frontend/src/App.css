@@ -620,6 +620,23 @@ select:focus {
   background: rgba(255, 255, 255, 0.24);
 }
 
+.export-range-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.export-range-controls label {
+  display: grid;
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+}
+
+.export-range-controls input {
+  min-width: 0;
+}
+
 .drawer-item {
   background: rgba(255, 255, 255, 0.12);
   color: white;
