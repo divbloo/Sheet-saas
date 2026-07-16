@@ -17,6 +17,10 @@ import {
   DEFAULT_ROW_HEIGHT,
   DEFAULT_COLUMN_WIDTHS,
   EXPORT_ROW_BATCH_SIZE,
+  CAIRO_TIMEZONE,
+  FIRST_CONFIRMATION_COLUMN_INDEX,
+  FIRST_CONFIRMATION_EDIT_END_MINUTE,
+  FIRST_CONFIRMATION_EDIT_START_MINUTE,
   IMPORT_BATCH_SIZE,
   INITIAL_VISIBLE_ROWS,
   LEGACY_PACKAGE_COLUMN_INDEX,
@@ -110,6 +114,28 @@ function App() {
   const canManageSheetUsers = role === "owner" || role === "admin";
   const canGrantSheetAdmin = role === "owner";
   const canBypassRowLocks = role === "owner" || role === "admin";
+  const firstConfirmationLockMessage = "First Confirmation can only be edited from 8:00 AM to 3:30 PM Cairo time";
+
+  const cairoTimeMinutes = () => {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: CAIRO_TIMEZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date());
+    const hour = Number(parts.find((part) => part.type === "hour")?.value || 0) % 24;
+    const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+
+    return (hour * 60) + minute;
+  };
+
+  const isFirstConfirmationColumn = (colIndex) => colIndex === FIRST_CONFIRMATION_COLUMN_INDEX;
+  const isFirstConfirmationEditOpen = () => {
+    const minutes = cairoTimeMinutes();
+
+    return minutes >= FIRST_CONFIRMATION_EDIT_START_MINUTE && minutes <= FIRST_CONFIRMATION_EDIT_END_MINUTE;
+  };
+
   const canEditProtectedRow = (rowIndex) => {
     if (!canEdit) return false;
     if (canBypassRowLocks) return true;
@@ -118,7 +144,9 @@ function App() {
     return !rowOwner || rowOwner.userId === currentUser?.id;
   };
   const canEditCell = (rowIndex, colIndex) => (
-    canEdit && (
+    canEdit &&
+    (!isFirstConfirmationColumn(colIndex) || isFirstConfirmationEditOpen()) &&
+    (
       colIndex > ROW_LOCK_LAST_COLUMN_INDEX ||
       canEditProtectedRow(rowIndex)
     )
@@ -128,6 +156,14 @@ function App() {
     return rowOwner
       ? `Row ${rowIndex + 1} is locked by ${rowOwner.username || rowOwner.email || "another user"}`
       : "You cannot edit this row";
+  };
+
+  const getCellLockMessage = (rowIndex, colIndex) => {
+    if (isFirstConfirmationColumn(colIndex) && !isFirstConfirmationEditOpen()) {
+      return firstConfirmationLockMessage;
+    }
+
+    return getRowLockMessage(rowIndex);
   };
   const statusText = savingStatus || (
     connectionStatus === "online"
@@ -1158,7 +1194,7 @@ function App() {
 
     const lockedPatch = patches.find((patch) => !canEditCell(patch.rowIndex, patch.colIndex));
     if (lockedPatch) {
-      showMessage(getRowLockMessage(lockedPatch.rowIndex));
+      showMessage(getCellLockMessage(lockedPatch.rowIndex, lockedPatch.colIndex));
       return;
     }
 
@@ -1201,7 +1237,7 @@ function App() {
     }
 
     if (!canEditCell(rowIndex, colIndex)) {
-      showMessage(getRowLockMessage(rowIndex));
+      showMessage(getCellLockMessage(rowIndex, colIndex));
       return;
     }
 
@@ -1227,7 +1263,7 @@ function App() {
 
   const updateCell = (rowIndex, colIndex, inputValue) => {
     if (!canEditCell(rowIndex, colIndex)) {
-      showMessage(getRowLockMessage(rowIndex));
+      showMessage(getCellLockMessage(rowIndex, colIndex));
       return;
     }
 
@@ -1287,7 +1323,7 @@ function App() {
 
     const { rowIndex, colIndex } = selectedCell;
     if (!canEditCell(rowIndex, colIndex)) {
-      showMessage(getRowLockMessage(rowIndex));
+      showMessage(getCellLockMessage(rowIndex, colIndex));
       return;
     }
 
@@ -1317,7 +1353,7 @@ function App() {
 
     const { rowIndex, colIndex } = selectedCell;
     if (!canEditCell(rowIndex, colIndex)) {
-      showMessage(getRowLockMessage(rowIndex));
+      showMessage(getCellLockMessage(rowIndex, colIndex));
       return;
     }
 
@@ -2980,7 +3016,7 @@ function App() {
             <span>{selectedCell ? cellAddress(selectedCell.rowIndex, selectedCell.colIndex) : "A1"}</span>
             <input
               readOnly={!selectedCellCanEdit}
-              title={selectedCell && !selectedCellCanEdit ? getRowLockMessage(selectedCell.rowIndex) : ""}
+              title={selectedCell && !selectedCellCanEdit ? getCellLockMessage(selectedCell.rowIndex, selectedCell.colIndex) : ""}
               value={
                 selectedCell
                   ? normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]).formula ||
@@ -3083,7 +3119,7 @@ function App() {
                               ? "locked-sheet-cell"
                               : "",
                           ].filter(Boolean).join(" ")}
-                          title={!cellCanEdit ? getRowLockMessage(rowIndex) : ""}
+                          title={!cellCanEdit ? getCellLockMessage(rowIndex, colIndex) : ""}
                           onMouseDown={() => {
                             setSelectedCell({ rowIndex, colIndex });
                             setSelectedRange({

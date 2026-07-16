@@ -110,6 +110,10 @@ export const visibleErpHeaders = [
 
 export const COLS = 15;
 export const ROW_LOCK_LAST_COLUMN_INDEX = 10;
+export const FIRST_CONFIRMATION_COLUMN_INDEX = 11;
+export const CAIRO_TIMEZONE = "Africa/Cairo";
+export const FIRST_CONFIRMATION_EDIT_START_MINUTE = 8 * 60;
+export const FIRST_CONFIRMATION_EDIT_END_MINUTE = (15 * 60) + 30;
 export const LEGACY_PACKAGE_COLUMN_INDEX = 8;
 export const MIN_SHEET_ROWS = 5000;
 export const IMPORT_BATCH_SIZE = 500;

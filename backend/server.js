@@ -153,7 +153,36 @@ const DEFAULT_SHEET_ROWS = 5000;
 const DEFAULT_ROW_PAGE_SIZE = 50;
 const MAX_ROW_PAGE_SIZE = 500;
 const ROW_LOCK_LAST_COLUMN_INDEX = 10;
+const FIRST_CONFIRMATION_COLUMN_INDEX = 11;
+const CAIRO_TIMEZONE = "Africa/Cairo";
+const FIRST_CONFIRMATION_EDIT_START_MINUTE = 8 * 60;
+const FIRST_CONFIRMATION_EDIT_END_MINUTE = (15 * 60) + 30;
 const ALLOWED_SHEET_TYPES = new Set(["custom", "item-master"]);
+
+const cairoTimeMinutes = () => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: CAIRO_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0) % 24;
+  const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+
+  return (hour * 60) + minute;
+};
+
+const isFirstConfirmationEditOpen = () => {
+  const minutes = cairoTimeMinutes();
+
+  return minutes >= FIRST_CONFIRMATION_EDIT_START_MINUTE && minutes <= FIRST_CONFIRMATION_EDIT_END_MINUTE;
+};
+
+const createTimeLockedColumnError = () => {
+  const error = new Error("First Confirmation can only be edited from 8:00 AM to 3:30 PM Cairo time");
+  error.statusCode = 403;
+  return error;
+};
 
 const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_COLS) => {
   return Array.from({ length: rows }, () =>
@@ -819,6 +848,13 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   const role = getUserRole(sheet, user.id);
 
   await migrateSheetRowsIfNeeded(sheet);
+
+  if (
+    normalizedPatches.some((patch) => Number(patch.colIndex) === FIRST_CONFIRMATION_COLUMN_INDEX) &&
+    !isFirstConfirmationEditOpen()
+  ) {
+    throw createTimeLockedColumnError();
+  }
 
   const editsProtectedColumns = normalizedPatches.some(
     (patch) => Number(patch.colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
@@ -1607,6 +1643,10 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
       return res.status(400).json({ message: "Invalid cell position" });
     }
 
+    if (Number(colIndex) === FIRST_CONFIRMATION_COLUMN_INDEX && !isFirstConfirmationEditOpen()) {
+      throw createTimeLockedColumnError();
+    }
+
     await migrateSheetRowsIfNeeded(sheet);
     const row = Number(colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
       ? await ensureRowEditAccess(sheet, req.user, role, Number(rowIndex))
@@ -2062,6 +2102,10 @@ io.on("connection", (socket) => {
         socket.emit("socket-error", "Invalid cell position");
         if (typeof ack === "function") ack({ ok: false, message: "Invalid cell position" });
         return;
+      }
+
+      if (Number(colIndex) === FIRST_CONFIRMATION_COLUMN_INDEX && !isFirstConfirmationEditOpen()) {
+        throw createTimeLockedColumnError();
       }
 
       await migrateSheetRowsIfNeeded(sheet);
