@@ -56,6 +56,8 @@ const TAX_EXPORT_COLUMN_WIDTHS = [14.73, 11.45, 12.54, 15.54, 42.73, 32.45, 30.4
 const TAX_ITEM_NAME_COLUMN_INDEX = 0;
 const TAX_ITEM_CODE_COLUMN_INDEX = 12;
 const TAX_ACTIVE_FROM_DAYS_AGO = 5;
+const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
+const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -106,6 +108,16 @@ function App() {
 
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [cellChanges, setCellChanges] = useState([]);
+  const [itemDescriptionOptions, setItemDescriptionOptions] = useState(null);
+  const [itemDescriptionOptionsLoading, setItemDescriptionOptionsLoading] = useState(false);
+  const [descriptionBuilder, setDescriptionBuilder] = useState({
+    open: false,
+    rowIndex: null,
+    type: "",
+    category: "",
+    filters: {},
+    combination: "",
+  });
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [erpOptionsOpen, setErpOptionsOpen] = useState(false);
@@ -1647,6 +1659,120 @@ function App() {
     return String(normalized.value || normalized.formula || "").trim();
   };
 
+  const uniqueDescriptionValues = (rows, key) => (
+    Array.from(new Set(rows.map((row) => row?.[key]).filter(Boolean)))
+  );
+
+  const loadItemDescriptionOptions = async () => {
+    if (itemDescriptionOptions) return itemDescriptionOptions;
+
+    setItemDescriptionOptionsLoading(true);
+    try {
+      const module = await import("./itemDescriptionOptions.json");
+      setItemDescriptionOptions(module.default);
+      return module.default;
+    } catch {
+      showMessage("Failed to load item description options");
+      return null;
+    } finally {
+      setItemDescriptionOptionsLoading(false);
+    }
+  };
+
+  const findDescriptionMatch = (value, options) => {
+    const text = String(value || "").trim();
+    if (!text) return null;
+
+    for (const type of Object.keys(options || {})) {
+      const option = options[type];
+      const row = option?.rows?.find((item) => item.combination === text);
+      if (row) return { type, row };
+    }
+
+    return null;
+  };
+
+  const openDescriptionBuilder = async (event, rowIndex) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (!canEditCell(rowIndex, DESCRIPTION_BUILDER_COLUMN_INDEX)) {
+      showMessage(getCellLockMessage(rowIndex, DESCRIPTION_BUILDER_COLUMN_INDEX));
+      return;
+    }
+
+    const options = await loadItemDescriptionOptions();
+    if (!options) return;
+
+    const descriptionTypes = Object.keys(options);
+    const cellValue = normalizeCell(selectedSheet?.data?.[rowIndex]?.[DESCRIPTION_BUILDER_COLUMN_INDEX]).value;
+    const match = findDescriptionMatch(cellValue, options);
+    const type = match?.type || descriptionTypes[0] || "";
+    const typeOptions = options[type] || EMPTY_DESCRIPTION_OPTIONS;
+    const filters = {};
+
+    if (match?.row) {
+      typeOptions.fields.forEach((field) => {
+        filters[field.key] = match.row[field.key] || "";
+      });
+    }
+
+    setSelectedCell({ rowIndex, colIndex: DESCRIPTION_BUILDER_COLUMN_INDEX });
+    setSelectedRange({
+      start: { row: rowIndex, col: DESCRIPTION_BUILDER_COLUMN_INDEX },
+      end: { row: rowIndex, col: DESCRIPTION_BUILDER_COLUMN_INDEX },
+    });
+    setDescriptionBuilder({
+      open: true,
+      rowIndex,
+      type,
+      category: match?.row?.category || "",
+      filters,
+      combination: match?.row?.combination || "",
+    });
+  };
+
+  const updateDescriptionBuilderType = (type) => {
+    setDescriptionBuilder((builder) => ({
+      ...builder,
+      type,
+      category: "",
+      filters: {},
+      combination: "",
+    }));
+  };
+
+  const updateDescriptionBuilderCategory = (category) => {
+    setDescriptionBuilder((builder) => ({
+      ...builder,
+      category,
+      filters: {},
+      combination: "",
+    }));
+  };
+
+  const updateDescriptionBuilderFilter = (fieldKey, value) => {
+    setDescriptionBuilder((builder) => ({
+      ...builder,
+      filters: { ...builder.filters, [fieldKey]: value },
+      combination: "",
+    }));
+  };
+
+  const applyDescriptionBuilder = () => {
+    if (!selectedDescriptionRow || descriptionBuilder.rowIndex === null) {
+      showMessage("Select a matching item description first");
+      return;
+    }
+
+    updateCell(
+      descriptionBuilder.rowIndex,
+      DESCRIPTION_BUILDER_COLUMN_INDEX,
+      selectedDescriptionRow.combination
+    );
+    setDescriptionBuilder((builder) => ({ ...builder, open: false }));
+  };
+
   const getExportRangeBounds = () => {
     if (!selectedSheet) return null;
 
@@ -2269,6 +2395,32 @@ function App() {
 
     return sheets.filter((sheet) => sheet.name.toLowerCase().includes(query));
   }, [sheetSearch, sheets]);
+
+  const descriptionOptions = itemDescriptionOptions || {};
+  const descriptionTypes = Object.keys(descriptionOptions);
+  const descriptionTypeOptions = descriptionOptions[descriptionBuilder.type] || EMPTY_DESCRIPTION_OPTIONS;
+  const descriptionRows = descriptionTypeOptions.rows || [];
+  const descriptionCategoryOptions = uniqueDescriptionValues(descriptionRows, "category");
+  const descriptionFilteredRows = descriptionRows.filter((row) => {
+    if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+
+    return Object.entries(descriptionBuilder.filters).every(([key, value]) => !value || row[key] === value);
+  });
+  const selectedDescriptionRow =
+    descriptionFilteredRows.find((row) => row.combination === descriptionBuilder.combination) ||
+    (descriptionFilteredRows.length === 1 ? descriptionFilteredRows[0] : null);
+
+  const getDescriptionFieldOptions = (fieldKey) => {
+    const rows = descriptionRows.filter((row) => {
+      if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+
+      return Object.entries(descriptionBuilder.filters).every(
+        ([key, value]) => key === fieldKey || !value || row[key] === value
+      );
+    });
+
+    return uniqueDescriptionValues(rows, fieldKey);
+  };
 
   const selectedCellStyle = selectedCell && selectedSheet
     ? normalizeCell(selectedSheet.data?.[selectedCell.rowIndex]?.[selectedCell.colIndex]).style
@@ -3335,30 +3487,52 @@ function App() {
                               </datalist>
                             </>
                           ) : (
-                            <textarea
-                              value={normalizedCell.value}
-                              readOnly={!cellCanEdit || (colIndex === 1 && rowIndex > 0)}
-                              style={{
-                                ...normalizedCell.style,
-                                width: "100%",
-                                minHeight: rowHeight,
-                                height: rowHeight,
-                                lineHeight: `${
-                                  isCodeColumn
-                                    ? Math.max(getTextLineHeight(normalizedCell.style), rowHeight - CELL_VERTICAL_PADDING)
-                                    : getTextLineHeight(normalizedCell.style)
-                                }px`,
-                                backgroundColor:
-                                  colIndex === 1 && rowIndex > 0
-                                    ? "#f8fafc"
-                                    : getCellBackground(normalizedCell.style, rowIndex),
-                              }}
-                              onFocus={() => setSelectedCell({ rowIndex, colIndex })}
-                              onContextMenu={(e) => {
-                                openCellContextMenu(e, rowIndex, colIndex);
-                              }}
-                              onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
-                            />
+                            <div className={colIndex === DESCRIPTION_BUILDER_COLUMN_INDEX ? "description-builder-cell" : ""}>
+                              <textarea
+                                value={normalizedCell.value}
+                                readOnly={!cellCanEdit || (colIndex === 1 && rowIndex > 0)}
+                                style={{
+                                  ...normalizedCell.style,
+                                  width: "100%",
+                                  minHeight: rowHeight,
+                                  height: rowHeight,
+                                  lineHeight: `${
+                                    isCodeColumn
+                                      ? Math.max(getTextLineHeight(normalizedCell.style), rowHeight - CELL_VERTICAL_PADDING)
+                                      : getTextLineHeight(normalizedCell.style)
+                                  }px`,
+                                  backgroundColor:
+                                    colIndex === 1 && rowIndex > 0
+                                      ? "#f8fafc"
+                                      : getCellBackground(normalizedCell.style, rowIndex),
+                                }}
+                                onFocus={() => setSelectedCell({ rowIndex, colIndex })}
+                                onContextMenu={(e) => {
+                                  openCellContextMenu(e, rowIndex, colIndex);
+                                }}
+                                onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
+                              />
+                              {colIndex === DESCRIPTION_BUILDER_COLUMN_INDEX && (
+                                <button
+                                  type="button"
+                                  className="description-builder-trigger"
+                                  disabled={!cellCanEdit}
+                                  title="Build item description"
+                                  onMouseDown={(event) => event.stopPropagation()}
+                                  onClick={(event) => openDescriptionBuilder(event, rowIndex)}
+                                >
+                                  {itemDescriptionOptionsLoading ? (
+                                    <small />
+                                  ) : (
+                                    <>
+                                      <span />
+                                      <span />
+                                      <span />
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                            </div>
                           )}
                         </td>
                       );
@@ -3426,6 +3600,88 @@ function App() {
             </div>
           )}
         </main>
+      )}
+
+      {descriptionBuilder.open && (
+        <div className="modal-backdrop">
+          <div className="modal-box large-modal description-builder-modal">
+            <h3>Item Description Builder</h3>
+
+            <div className="description-builder-grid">
+              <label>
+                <span>Item Type</span>
+                <select
+                  value={descriptionBuilder.type}
+                  onChange={(event) => updateDescriptionBuilderType(event.target.value)}
+                >
+                  {descriptionTypes.map((type) => (
+                    <option key={type} value={type}>
+                      {descriptionOptions[type].label || type}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                <span>Category</span>
+                <select
+                  value={descriptionBuilder.category}
+                  onChange={(event) => updateDescriptionBuilderCategory(event.target.value)}
+                >
+                  <option value="">Select category</option>
+                  {descriptionCategoryOptions.map((category) => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
+              </label>
+
+              {descriptionTypeOptions.fields.map((field) => (
+                <label key={field.key}>
+                  <span>{field.label}</span>
+                  <select
+                    value={descriptionBuilder.filters[field.key] || ""}
+                    disabled={!descriptionBuilder.category}
+                    onChange={(event) => updateDescriptionBuilderFilter(field.key, event.target.value)}
+                  >
+                    <option value="">Select {field.label}</option>
+                    {getDescriptionFieldOptions(field.key).map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+
+            <label>Matching Combination</label>
+            <select
+              value={descriptionBuilder.combination}
+              disabled={!descriptionBuilder.category || !descriptionFilteredRows.length}
+              onChange={(event) =>
+                setDescriptionBuilder((builder) => ({ ...builder, combination: event.target.value }))
+              }
+            >
+              <option value="">Select combination</option>
+              {descriptionFilteredRows.map((row) => (
+                <option key={row.combination} value={row.combination}>
+                  {row.combination}
+                </option>
+              ))}
+            </select>
+
+            <div className="description-builder-preview">
+              {selectedDescriptionRow?.combination || "Select item specs to preview the final description"}
+            </div>
+
+            <div className="modal-actions">
+              <button onClick={applyDescriptionBuilder} disabled={!selectedDescriptionRow}>
+                Use Description
+              </button>
+              <button onClick={() => setDescriptionBuilder((builder) => ({ ...builder, open: false }))}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {deleteConfirmOpen && (

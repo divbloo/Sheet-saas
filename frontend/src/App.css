@@ -1111,6 +1111,48 @@ select:focus {
   box-sizing: border-box;
 }
 
+.description-builder-cell {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
+}
+
+.description-builder-cell textarea {
+  padding-right: 32px;
+}
+
+.description-builder-trigger {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.72);
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  z-index: 5;
+}
+
+.description-builder-trigger span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #111111;
+}
+
+.description-builder-trigger:hover {
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.description-builder-trigger:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
 .sheet-table-full td textarea {
   resize: none;
   overflow: hidden;
@@ -1348,6 +1390,36 @@ select:focus {
 .modal-box input,
 .modal-box select {
   width: 100%;
+}
+
+.description-builder-modal {
+  width: 820px;
+}
+
+.description-builder-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.description-builder-grid label {
+  margin: 0;
+}
+
+.description-builder-grid label span {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.description-builder-preview {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #99f6e4;
+  border-radius: 10px;
+  background: #f0fdfa;
+  color: #134e4a;
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .modal-actions {
