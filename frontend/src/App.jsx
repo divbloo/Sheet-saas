@@ -56,8 +56,47 @@ const TAX_EXPORT_COLUMN_WIDTHS = [14.73, 11.45, 12.54, 15.54, 42.73, 32.45, 30.4
 const TAX_ITEM_NAME_COLUMN_INDEX = 0;
 const TAX_ITEM_CODE_COLUMN_INDEX = 12;
 const TAX_ACTIVE_FROM_DAYS_AGO = 5;
+const TAX_EXPORT_FILE_NAME = "NewCodeBulkTemplate (2).xlsx";
 const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
 const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
+
+const padDatePart = (value) => String(value).padStart(2, "0");
+
+const getCairoDateTimeParts = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: CAIRO_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+
+  return Object.fromEntries(parts.map((part) => [part.type, part.value]));
+};
+
+const formatCairoDateTimeInput = (date = new Date()) => {
+  const parts = getCairoDateTimeParts(date);
+  const hour = String(Number(parts.hour || 0) % 24);
+
+  return [
+    parts.year,
+    padDatePart(parts.month),
+    padDatePart(parts.day),
+  ].join("-") + "T" + [padDatePart(hour), padDatePart(parts.minute)].join(":");
+};
+
+const getDefaultTaxExportPeriod = () => {
+  const now = new Date();
+  const parts = getCairoDateTimeParts(now);
+  const date = [parts.year, padDatePart(parts.month), padDatePart(parts.day)].join("-");
+
+  return {
+    from: date + "T00:00",
+    to: formatCairoDateTimeInput(now),
+  };
+};
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -83,6 +122,7 @@ function App() {
   const [visibleRows, setVisibleRows] = useState(INITIAL_VISIBLE_ROWS);
   const [sheetRowTotal, setSheetRowTotal] = useState(0);
   const [exportRange, setExportRange] = useState({ from: "1", to: "" });
+  const [taxExportPeriod, setTaxExportPeriod] = useState(getDefaultTaxExportPeriod);
   const [rowsLoading, setRowsLoading] = useState(false);
   const [gridScrollTop, setGridScrollTop] = useState(0);
   const [role, setRole] = useState(null);
@@ -1773,6 +1813,26 @@ function App() {
     setDescriptionBuilder((builder) => ({ ...builder, open: false }));
   };
 
+  const getTaxExportDateBounds = () => {
+    const fromDate = new Date(taxExportPeriod.from);
+    const toDate = new Date(taxExportPeriod.to || formatCairoDateTimeInput(new Date()));
+
+    if (
+      !taxExportPeriod.from ||
+      Number.isNaN(fromDate.getTime()) ||
+      Number.isNaN(toDate.getTime()) ||
+      fromDate > toDate
+    ) {
+      showMessage("Choose a valid tax export date and time range");
+      return null;
+    }
+
+    return {
+      from: fromDate.toISOString(),
+      to: toDate.toISOString(),
+    };
+  };
+
   const getExportRangeBounds = () => {
     if (!selectedSheet) return null;
 
@@ -2089,25 +2149,29 @@ function App() {
   const exportTaxExcel = async () => {
     if (!selectedSheet) return;
 
-    const range = getExportRangeBounds();
-    if (!range) return;
+    const dateBounds = getTaxExportDateBounds();
+    if (!dateBounds) return;
+
+    const params = new URLSearchParams(dateBounds);
+    const res = await authFetch(API_URL + "/sheet/" + selectedSheet._id + "/tax-export-rows?" + params.toString());
+    const data = await res.json();
+
+    if (!res.ok) {
+      showMessage(data.message || "Failed to load tax export rows");
+      return;
+    }
 
     const XLSX = await loadExcelTools();
-    const exportRows = await loadRowsForExportRange(range);
     const activeFrom = getCairoDateDaysAgo(TAX_ACTIVE_FROM_DAYS_AGO);
-    const taxRows = exportRows
-      .map((row) => {
-        const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
-        const itemName = getCellExportText(row, TAX_ITEM_NAME_COLUMN_INDEX);
+    const taxRows = (data.rows || []).map(({ cells }) => {
+      const itemCode = getCellExportText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
+      const itemName = getCellExportText(cells, TAX_ITEM_NAME_COLUMN_INDEX);
 
-        if (!itemCode && !itemName) return null;
-
-        return ["EGS", itemCode, itemName, itemName, itemName, itemName, activeFrom, null, null, null];
-      })
-      .filter(Boolean);
+      return ["EGS", itemCode, itemName, itemName, itemName, itemName, activeFrom, null, null, null];
+    });
 
     if (!taxRows.length) {
-      showMessage("No item rows found in selected range");
+      showMessage("No new confirmed coded items found in selected period");
       return;
     }
 
@@ -2142,7 +2206,7 @@ function App() {
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "DataEntry");
-    XLSX.writeFile(workbook, "NewCodeBulkTemplate (2).xlsx", { cellDates: true });
+    XLSX.writeFile(workbook, TAX_EXPORT_FILE_NAME, { cellDates: true });
   };
 
   const uploadExcel = async (event) => {
@@ -3167,6 +3231,28 @@ function App() {
               </div>
               <button onClick={exportExcel}>Export Excel</button>
               <button onClick={exportPDF}>Export PDF</button>
+              <div className="tax-export-controls">
+                <label>
+                  <span>Tax from</span>
+                  <input
+                    type="datetime-local"
+                    value={taxExportPeriod.from}
+                    onChange={(event) =>
+                      setTaxExportPeriod((period) => ({ ...period, from: event.target.value }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Tax to</span>
+                  <input
+                    type="datetime-local"
+                    value={taxExportPeriod.to}
+                    onChange={(event) =>
+                      setTaxExportPeriod((period) => ({ ...period, to: event.target.value }))
+                    }
+                  />
+                </label>
+              </div>
               <button onClick={exportTaxExcel}>Export Taxes Excel</button>
               <button onClick={saveVersion}>Save Version</button>
               <button onClick={showAllChanges}>Show All Changes</button>

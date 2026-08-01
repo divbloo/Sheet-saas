@@ -49,6 +49,22 @@ const escapeCsvCell = (value) => {
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const getCellText = (cells = [], colIndex) => {
+  const cell = cells[colIndex] || {};
+  if (cell && typeof cell === "object") return String(cell.formula || cell.value || "").trim();
+  return String(cell || "").trim();
+};
+
+const parseRequiredDate = (value) => {
+  const date = new Date(String(value || ""));
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const compareText = (left, right) => String(left || "").localeCompare(String(right || ""), "en", {
+  numeric: true,
+  sensitivity: "base",
+});
+
 const sendJson = (req, res, payload) => {
   const body = JSON.stringify(payload);
 
@@ -154,6 +170,13 @@ const DEFAULT_ROW_PAGE_SIZE = 50;
 const MAX_ROW_PAGE_SIZE = 500;
 const ROW_LOCK_LAST_COLUMN_INDEX = 10;
 const FIRST_CONFIRMATION_COLUMN_INDEX = 11;
+const TAX_ITEM_NAME_COLUMN_INDEX = 0;
+const TAX_MAIN_GROUP_COLUMN_INDEX = 2;
+const TAX_SUB_GROUP_COLUMN_INDEX = 3;
+const TAX_SUB_SUB_GROUP_COLUMN_INDEX = 4;
+const TAX_SUPPORT_GROUP_COLUMN_INDEX = 5;
+const TAX_DETAILED_GROUP_COLUMN_INDEX = 6;
+const TAX_ITEM_CODE_COLUMN_INDEX = 12;
 const CAIRO_TIMEZONE = "Africa/Cairo";
 const FIRST_CONFIRMATION_EDIT_START_MINUTE = 8 * 60;
 const FIRST_CONFIRMATION_EDIT_END_MINUTE = (15 * 60) + 30;
@@ -1434,6 +1457,91 @@ app.get("/sheet/:id/search", auth, async (req, res) => {
     sendJson(req, res, { matches, total: matches.length, truncated: false });
   } catch (error) {
     res.status(500).json({ message: "Failed to search sheet" });
+  }
+});
+
+app.get("/sheet/:id/tax-export-rows", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    const fromDate = parseRequiredDate(req.query.from);
+    const toDate = parseRequiredDate(req.query.to);
+
+    if (!fromDate || !toDate || fromDate > toDate) {
+      return res.status(400).json({ message: "Choose a valid tax export date range" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+
+    const codeChanges = await ChangeLog.find({
+      sheetId: sheet._id,
+      colIndex: TAX_ITEM_CODE_COLUMN_INDEX,
+      changeType: { $in: ["value", "formula"] },
+      createdAt: { $gte: fromDate, $lte: toDate },
+    })
+      .sort({ createdAt: 1 })
+      .select("rowIndex newValue createdAt")
+      .lean();
+
+    const rowIndexes = Array.from(new Set(
+      codeChanges
+        .filter((change) => String(change.newValue || "").trim())
+        .map((change) => change.rowIndex)
+    ));
+
+    if (!rowIndexes.length) {
+      return sendJson(req, res, { rows: [] });
+    }
+
+    const changedAtByRow = new Map();
+    codeChanges.forEach((change) => {
+      if (!String(change.newValue || "").trim()) return;
+      changedAtByRow.set(change.rowIndex, change.createdAt);
+    });
+
+    const rows = await SheetRow.find({
+      sheetId: sheet._id,
+      rowIndex: { $in: rowIndexes },
+    }).lean();
+
+    const taxRows = rows
+      .map((row) => ({
+        rowIndex: row.rowIndex,
+        changedAt: changedAtByRow.get(row.rowIndex),
+        cells: normalizeRowCells(row.cells),
+      }))
+      .filter((row) => {
+        const itemName = getCellText(row.cells, TAX_ITEM_NAME_COLUMN_INDEX);
+        const firstConfirmation = getCellText(row.cells, FIRST_CONFIRMATION_COLUMN_INDEX);
+        const itemCode = getCellText(row.cells, TAX_ITEM_CODE_COLUMN_INDEX);
+
+        return itemName && firstConfirmation && itemCode;
+      })
+      .sort((left, right) => {
+        const sortColumns = [
+          TAX_MAIN_GROUP_COLUMN_INDEX,
+          TAX_SUB_GROUP_COLUMN_INDEX,
+          TAX_SUB_SUB_GROUP_COLUMN_INDEX,
+          TAX_SUPPORT_GROUP_COLUMN_INDEX,
+          TAX_DETAILED_GROUP_COLUMN_INDEX,
+          TAX_ITEM_NAME_COLUMN_INDEX,
+        ];
+
+        for (const colIndex of sortColumns) {
+          const result = compareText(getCellText(left.cells, colIndex), getCellText(right.cells, colIndex));
+          if (result !== 0) return result;
+        }
+
+        return left.rowIndex - right.rowIndex;
+      });
+
+    sendJson(req, res, { rows: taxRows });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load tax export rows" });
   }
 });
 
