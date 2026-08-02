@@ -1368,10 +1368,13 @@ function App() {
     if (!touchesPendingState) return;
 
     const getNextValue = (colIndex) => {
-      const patch = patches.find((item) => item.rowIndex === rowIndex && item.colIndex === colIndex);
+      const patch = patches.find((item) => (
+        Number(item.rowIndex) === Number(rowIndex) &&
+        Number(item.colIndex) === Number(colIndex)
+      ));
       if (patch) return String(patch.formula || patch.value || "").trim();
 
-      return getCellExportText(selectedSheet?.data?.[rowIndex], colIndex);
+      return getCellExportText(selectedSheetRef.current?.data?.[rowIndex], colIndex);
     };
     const firstConfirmation = getNextValue(FIRST_CONFIRMATION_COLUMN_INDEX);
     const itemCode = getNextValue(TAX_ITEM_CODE_COLUMN_INDEX);
@@ -2718,8 +2721,11 @@ function App() {
         : [{ rowIndex, colIndex, value, formula }];
 
       if (touchesPendingCodeColumns(socketPatches)) {
-        const activeSheetId = selectedSheetRef.current?._id;
-        if (activeSheetId) void loadPendingCodeRows(activeSheetId);
+        Array.from(new Set(socketPatches.map((patch) => Number(patch.rowIndex)))).forEach((patchRowIndex) => {
+          if (Number.isInteger(patchRowIndex)) {
+            syncPendingCodeRowFromPatches(patchRowIndex, socketPatches);
+          }
+        });
       }
 
       setSelectedSheet((prev) => {
