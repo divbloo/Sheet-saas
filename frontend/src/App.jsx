@@ -2553,16 +2553,20 @@ function App() {
     return sheets.filter((sheet) => sheet.name.toLowerCase().includes(query));
   }, [sheetSearch, sheets]);
 
-  const descriptionOptions = itemDescriptionOptions || {};
+  const descriptionOptions = descriptionBuilder.open ? itemDescriptionOptions || {} : {};
   const descriptionTypes = Object.keys(descriptionOptions);
   const descriptionTypeOptions = descriptionOptions[descriptionBuilder.type] || EMPTY_DESCRIPTION_OPTIONS;
-  const descriptionRows = descriptionTypeOptions.rows || [];
-  const descriptionCategoryOptions = uniqueDescriptionValues(descriptionRows, "category");
-  const descriptionFilteredRows = descriptionRows.filter((row) => {
-    if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+  const descriptionRows = descriptionBuilder.open ? descriptionTypeOptions.rows || [] : [];
+  const descriptionCategoryOptions = descriptionBuilder.open
+    ? uniqueDescriptionValues(descriptionRows, "category")
+    : [];
+  const descriptionFilteredRows = descriptionBuilder.open
+    ? descriptionRows.filter((row) => {
+        if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
 
-    return Object.entries(descriptionBuilder.filters).every(([key, value]) => !value || row[key] === value);
-  });
+        return Object.entries(descriptionBuilder.filters).every(([key, value]) => !value || row[key] === value);
+      })
+    : [];
   const selectedDescriptionRow =
     descriptionFilteredRows.find((row) => row.combination === descriptionBuilder.combination) ||
     (descriptionFilteredRows.length === 1 ? descriptionFilteredRows[0] : null);

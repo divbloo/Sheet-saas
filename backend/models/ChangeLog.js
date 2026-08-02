@@ -55,5 +55,6 @@ ChangeLogSchema.index({ sheetId: 1, createdAt: -1 });
 ChangeLogSchema.index({ workspaceId: 1, createdAt: -1 });
 ChangeLogSchema.index({ userId: 1, createdAt: -1 });
 ChangeLogSchema.index({ sheetId: 1, rowIndex: 1, colIndex: 1, createdAt: -1 });
+ChangeLogSchema.index({ sheetId: 1, colIndex: 1, createdAt: 1 });
 
 module.exports = mongoose.model("ChangeLog", ChangeLogSchema);
