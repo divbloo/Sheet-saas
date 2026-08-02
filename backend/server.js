@@ -1460,6 +1460,39 @@ app.get("/sheet/:id/search", auth, async (req, res) => {
   }
 });
 
+app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+
+    const rowIndexes = [];
+    const cursor = SheetRow.find({ sheetId: sheet._id })
+      .sort({ rowIndex: 1 })
+      .select("rowIndex cells")
+      .lean()
+      .cursor();
+
+    for await (const row of cursor) {
+      const cells = normalizeRowCells(row.cells);
+      const firstConfirmation = getCellText(cells, FIRST_CONFIRMATION_COLUMN_INDEX);
+      const itemCode = getCellText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
+
+      if (firstConfirmation && !itemCode) {
+        rowIndexes.push(row.rowIndex);
+      }
+    }
+
+    sendJson(req, res, { rowIndexes });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load pending code rows" });
+  }
+});
+
 app.get("/sheet/:id/tax-export-rows", auth, async (req, res) => {
   try {
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);

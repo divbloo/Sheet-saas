@@ -123,6 +123,9 @@ function App() {
   const [sheetRowTotal, setSheetRowTotal] = useState(0);
   const [exportRange, setExportRange] = useState({ from: "1", to: "" });
   const [taxExportPeriod, setTaxExportPeriod] = useState(getDefaultTaxExportPeriod);
+  const [serverPendingCodeRows, setServerPendingCodeRows] = useState([]);
+  const [visitedPendingCodeRows, setVisitedPendingCodeRows] = useState([]);
+  const [pendingCodeCursor, setPendingCodeCursor] = useState(null);
   const [rowsLoading, setRowsLoading] = useState(false);
   const [gridScrollTop, setGridScrollTop] = useState(0);
   const [role, setRole] = useState(null);
@@ -744,6 +747,17 @@ function App() {
     }
   };
 
+  const loadPendingCodeRows = async (sheetId) => {
+    if (!sheetId) return;
+
+    const res = await authFetch(API_URL + "/sheet/" + sheetId + "/pending-code-rows");
+    const data = await res.json();
+
+    if (res.ok) {
+      setServerPendingCodeRows(Array.isArray(data.rowIndexes) ? data.rowIndexes : []);
+    }
+  };
+
   const createSheet = async () => {
     const res = await authFetch(API_URL + "/sheet", {
       method: "POST",
@@ -837,7 +851,12 @@ function App() {
     setCurrentPage("sheet");
     setMenuOpen(false);
 
-    await loadErpOptions(id);
+    await Promise.all([
+      loadErpOptions(id),
+      loadPendingCodeRows(id),
+    ]);
+    setVisitedPendingCodeRows([]);
+    setPendingCodeCursor(null);
 
     window.requestAnimationFrame(() => {
       if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
@@ -1932,6 +1951,45 @@ function App() {
     return matches;
   };
 
+  const centerRowInGrid = (rowIndex) => {
+    const grid = gridRef.current;
+    const viewportHeight = grid?.clientHeight || window.innerHeight;
+    const scrollTop = Math.max(
+      0,
+      (rowIndex * DEFAULT_ROW_HEIGHT) - (viewportHeight / 2) + (DEFAULT_ROW_HEIGHT / 2)
+    );
+
+    setGridScrollTop(scrollTop);
+    window.requestAnimationFrame(() => {
+      gridRef.current?.scrollTo({ top: scrollTop, behavior: "smooth" });
+    });
+  };
+
+  const goToPendingCodeRow = async () => {
+    if (!pendingCodeRows.length) {
+      showMessage("No confirmed rows waiting for code");
+      return;
+    }
+
+    const currentPendingIndex = pendingCodeRows.indexOf(pendingCodeCursor);
+    const rowIndex = unvisitedPendingCodeRows.length
+      ? unvisitedPendingCodeRows[0]
+      : pendingCodeRows[currentPendingIndex >= 0 ? (currentPendingIndex + 1) % pendingCodeRows.length : 0];
+
+    await ensureRowsLoaded(rowIndex + 1);
+    setVisibleRows((count) => Math.max(count, rowIndex + 1));
+    setSelectedCell({ rowIndex, colIndex: TAX_ITEM_CODE_COLUMN_INDEX });
+    setSelectedRange({
+      start: { row: rowIndex, col: TAX_ITEM_CODE_COLUMN_INDEX },
+      end: { row: rowIndex, col: TAX_ITEM_CODE_COLUMN_INDEX },
+    });
+    setVisitedPendingCodeRows((rows) => (
+      rows.includes(rowIndex) ? rows : [...rows, rowIndex]
+    ));
+    setPendingCodeCursor(rowIndex);
+    centerRowInGrid(rowIndex);
+  };
+
   const goToCellSearchResult = async (direction = 1) => {
     if (!cellSearch.trim()) {
       showMessage("Type something to search");
@@ -2441,6 +2499,9 @@ function App() {
     setSheets([]);
     setSelectedSheet(null);
     setSheetRowTotal(0);
+    setServerPendingCodeRows([]);
+    setVisitedPendingCodeRows([]);
+    setPendingCodeCursor(null);
     setGridScrollTop(0);
     setMenuOpen(false);
   };
@@ -2486,6 +2547,28 @@ function App() {
     return uniqueDescriptionValues(rows, fieldKey);
   };
 
+  const localPendingCodeRows = selectedSheet?.data?.reduce((rows, row, rowIndex) => {
+    const firstConfirmation = getCellExportText(row, FIRST_CONFIRMATION_COLUMN_INDEX);
+    const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
+
+    if (firstConfirmation && !itemCode) rows.push(rowIndex);
+    return rows;
+  }, []) || [];
+  const pendingCodeRows = Array.from(new Set([...serverPendingCodeRows, ...localPendingCodeRows]))
+    .filter((rowIndex) => {
+      const row = selectedSheet?.data?.[rowIndex];
+      if (!row) return true;
+
+      const firstConfirmation = getCellExportText(row, FIRST_CONFIRMATION_COLUMN_INDEX);
+      const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
+      return firstConfirmation && !itemCode;
+    })
+    .sort((left, right) => left - right);
+  const unvisitedPendingCodeRows = pendingCodeRows.filter(
+    (rowIndex) => !visitedPendingCodeRows.includes(rowIndex)
+  );
+  const pendingCodeBadgeCount = unvisitedPendingCodeRows.length;
+
   const selectedCellStyle = selectedCell && selectedSheet
     ? normalizeCell(selectedSheet.data?.[selectedCell.rowIndex]?.[selectedCell.colIndex]).style
     : defaultCellStyle;
@@ -2526,6 +2609,7 @@ function App() {
           loadSheets(),
           loadAnalytics(),
           activeSheetId ? loadErpOptions(activeSheetId) : Promise.resolve(),
+          activeSheetId ? loadPendingCodeRows(activeSheetId) : Promise.resolve(),
         ]);
         setSavingStatus((current) => current === "Unsaved changes..." ? current : "Refreshed");
         window.setTimeout(() => {
@@ -2913,6 +2997,20 @@ function App() {
               </button>
               <button title="Next result" onClick={() => goToCellSearchResult(1)}>
                 Next
+              </button>
+            </div>
+
+            <div className="toolbar-group pending-code-group">
+              <button
+                className={pendingCodeRows.length ? "pending-code-button active" : "pending-code-button"}
+                disabled={!pendingCodeRows.length || rowsLoading}
+                title="Go to confirmed rows waiting for item code"
+                onClick={goToPendingCodeRow}
+              >
+                Needs Code
+                {pendingCodeBadgeCount > 0 && (
+                  <span className="pending-code-badge">{pendingCodeBadgeCount}</span>
+                )}
               </button>
             </div>
 
@@ -3482,6 +3580,10 @@ function App() {
                   return (
                     <tr
                       key={rowIndex}
+                      className={[
+                        pendingCodeRows.includes(rowIndex) ? "pending-code-row" : "",
+                        pendingCodeCursor === rowIndex ? "pending-code-row-focused" : "",
+                      ].filter(Boolean).join(" ")}
                       style={{ height: rowHeight }}
                     >
                       <th
@@ -3511,6 +3613,9 @@ function App() {
                       const isInSelectedRange = isCellInSelectedRange(rowIndex, colIndex);
                       const isCodeColumn = colIndex === 12;
                       const cellCanEdit = canEditCell(rowIndex, colIndex);
+                      const isDescriptionCell = colIndex === DESCRIPTION_BUILDER_COLUMN_INDEX;
+                      const showDescriptionBuilderTrigger =
+                        isDescriptionCell && !String(normalizedCell.value || normalizedCell.formula || "").trim();
 
                       const dropdownOptions = getDropdownOptions(rowIndex, colIndex);
 
@@ -3573,7 +3678,7 @@ function App() {
                               </datalist>
                             </>
                           ) : (
-                            <div className={colIndex === DESCRIPTION_BUILDER_COLUMN_INDEX ? "description-builder-cell" : ""}>
+                            <div className={isDescriptionCell ? "description-builder-cell" : ""}>
                               <textarea
                                 value={normalizedCell.value}
                                 readOnly={!cellCanEdit || (colIndex === 1 && rowIndex > 0)}
@@ -3598,7 +3703,7 @@ function App() {
                                 }}
                                 onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
                               />
-                              {colIndex === DESCRIPTION_BUILDER_COLUMN_INDEX && (
+                              {showDescriptionBuilderTrigger && (
                                 <button
                                   type="button"
                                   className="description-builder-trigger"

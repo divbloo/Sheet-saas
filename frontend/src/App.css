@@ -512,6 +512,43 @@ select:focus {
   padding: 0 10px;
 }
 
+.pending-code-group {
+  position: relative;
+}
+
+.pending-code-button {
+  position: relative;
+  padding-right: 12px;
+}
+
+.pending-code-button.active {
+  background: #fff7ed !important;
+  border-color: #fdba74 !important;
+  color: #92400e !important;
+}
+
+.pending-code-button.active:hover {
+  background: #ffedd5 !important;
+  border-color: #fb923c !important;
+}
+
+.pending-code-badge {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 0 0 2px #ffffff;
+}
+
 .save-tool {
   background: #0f766e !important;
   color: #ffffff !important;
@@ -1127,17 +1164,21 @@ select:focus {
 .description-builder-trigger {
   position: absolute;
   top: 4px;
-  right: 4px;
-  width: 22px;
-  height: 28px;
+  right: 5px;
+  width: 24px;
+  height: 30px;
   padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
   display: grid;
   place-items: center;
   gap: 2px;
+  opacity: 0.18;
+  transform: translateY(-1px);
+  transition: opacity 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
   z-index: 5;
+  box-shadow: 0 5px 12px rgba(15, 23, 42, 0.08);
 }
 
 .description-builder-trigger span {
@@ -1147,13 +1188,33 @@ select:focus {
   background: #111111;
 }
 
+.sheet-table-full tr:hover .description-builder-trigger,
+.description-builder-trigger:focus-visible {
+  opacity: 0.96;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 118, 110, 0.18);
+  transform: translateY(0);
+}
+
 .description-builder-trigger:hover {
-  background: rgba(15, 118, 110, 0.12);
+  background: #ecfeff;
 }
 
 .description-builder-trigger:disabled {
-  opacity: 0.35;
+  opacity: 0.08;
   cursor: not-allowed;
+}
+
+.sheet-table-full tr.pending-code-row td {
+  box-shadow: inset 0 0 0 9999px rgba(251, 191, 36, 0.08);
+}
+
+.sheet-table-full tr.pending-code-row th {
+  box-shadow: inset 4px 0 0 #f97316;
+}
+
+.sheet-table-full tr.pending-code-row-focused td {
+  box-shadow: inset 0 0 0 9999px rgba(14, 165, 233, 0.12);
 }
 
 .sheet-table-full td textarea {
