@@ -1257,6 +1257,13 @@ function App() {
     );
   };
 
+  const touchesPendingCodeColumns = (patches = []) => {
+    return patches.some((patch) => (
+      Number(patch.colIndex) === FIRST_CONFIRMATION_COLUMN_INDEX ||
+      Number(patch.colIndex) === TAX_ITEM_CODE_COLUMN_INDEX
+    ));
+  };
+
   const mergeRowsAtStart = (currentRows, incomingRows, start) => {
     const nextRows = [...currentRows];
 
@@ -2706,13 +2713,18 @@ function App() {
     socketRef.current.on("presence-updated", setOnlineUsers);
 
     socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches, rowOwners }) => {
+      const socketPatches = Array.isArray(patches) && patches.length > 0
+        ? patches
+        : [{ rowIndex, colIndex, value, formula }];
+
+      if (touchesPendingCodeColumns(socketPatches)) {
+        const activeSheetId = selectedSheetRef.current?._id;
+        if (activeSheetId) void loadPendingCodeRows(activeSheetId);
+      }
+
       setSelectedSheet((prev) => {
         if (!prev) return prev;
-        const incomingPatches = (
-          Array.isArray(patches) && patches.length > 0
-            ? patches
-            : [{ rowIndex, colIndex, value, formula }]
-        ).filter((patch) => (
+        const incomingPatches = socketPatches.filter((patch) => (
           !localCellDraftsRef.current.has(getCellPatchKey(prev._id, patch)) &&
           !patchMatchesCell(prev.data?.[patch.rowIndex]?.[patch.colIndex], patch)
         ));
