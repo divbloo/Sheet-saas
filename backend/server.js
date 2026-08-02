@@ -1470,22 +1470,50 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    const rowIndexes = [];
-    const cursor = SheetRow.find({ sheetId: sheet._id })
+    const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
+    const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
+    const itemCodeValuePath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.value`;
+    const itemCodeFormulaPath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.formula`;
+    const candidateRows = await SheetRow.find({
+      sheetId: sheet._id,
+      $and: [
+        {
+          $or: [
+            { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
+            { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
+          ],
+        },
+        {
+          $and: [
+            {
+              $or: [
+                { [itemCodeValuePath]: { $in: ["", null] } },
+                { [itemCodeValuePath]: { $exists: false } },
+              ],
+            },
+            {
+              $or: [
+                { [itemCodeFormulaPath]: { $in: ["", null] } },
+                { [itemCodeFormulaPath]: { $exists: false } },
+              ],
+            },
+          ],
+        },
+      ],
+    })
       .sort({ rowIndex: 1 })
       .select("rowIndex cells")
-      .lean()
-      .cursor();
+      .lean();
 
-    for await (const row of cursor) {
-      const cells = normalizeRowCells(row.cells);
-      const firstConfirmation = getCellText(cells, FIRST_CONFIRMATION_COLUMN_INDEX);
-      const itemCode = getCellText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
+    const rowIndexes = candidateRows
+      .filter((row) => {
+        const cells = normalizeRowCells(row.cells);
+        const firstConfirmation = getCellText(cells, FIRST_CONFIRMATION_COLUMN_INDEX);
+        const itemCode = getCellText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
 
-      if (firstConfirmation && !itemCode) {
-        rowIndexes.push(row.rowIndex);
-      }
-    }
+        return firstConfirmation && !itemCode;
+      })
+      .map((row) => row.rowIndex);
 
     sendJson(req, res, { rowIndexes });
   } catch (error) {

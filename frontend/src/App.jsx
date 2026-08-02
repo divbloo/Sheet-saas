@@ -1351,6 +1351,37 @@ function App() {
     }
   };
 
+  const syncPendingCodeRowFromPatches = (rowIndex, patches) => {
+    const touchesPendingState = patches.some(
+      (patch) =>
+        patch.colIndex === FIRST_CONFIRMATION_COLUMN_INDEX ||
+        patch.colIndex === TAX_ITEM_CODE_COLUMN_INDEX
+    );
+
+    if (!touchesPendingState) return;
+
+    const getNextValue = (colIndex) => {
+      const patch = patches.find((item) => item.rowIndex === rowIndex && item.colIndex === colIndex);
+      if (patch) return String(patch.formula || patch.value || "").trim();
+
+      return getCellExportText(selectedSheet?.data?.[rowIndex], colIndex);
+    };
+    const firstConfirmation = getNextValue(FIRST_CONFIRMATION_COLUMN_INDEX);
+    const itemCode = getNextValue(TAX_ITEM_CODE_COLUMN_INDEX);
+
+    setServerPendingCodeRows((rows) => {
+      const rowSet = new Set(rows);
+
+      if (firstConfirmation && !itemCode) {
+        rowSet.add(rowIndex);
+      } else {
+        rowSet.delete(rowIndex);
+      }
+
+      return Array.from(rowSet).sort((left, right) => left - right);
+    });
+  };
+
   const updateCell = (rowIndex, colIndex, inputValue) => {
     if (!canEditCell(rowIndex, colIndex)) {
       showMessage(getCellLockMessage(rowIndex, colIndex));
@@ -1395,6 +1426,7 @@ function App() {
       queueSave: !socketRef.current,
       recalculate: shouldRecalculateForPatches(patches),
     });
+    syncPendingCodeRowFromPatches(rowIndex, patches);
 
     if (selectedSheet) {
       queueCellSocketSave({
@@ -2547,16 +2579,10 @@ function App() {
     return uniqueDescriptionValues(rows, fieldKey);
   };
 
-  const localPendingCodeRows = selectedSheet?.data?.reduce((rows, row, rowIndex) => {
-    const firstConfirmation = getCellExportText(row, FIRST_CONFIRMATION_COLUMN_INDEX);
-    const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
-
-    if (firstConfirmation && !itemCode) rows.push(rowIndex);
-    return rows;
-  }, []) || [];
-  const pendingCodeRows = Array.from(new Set([...serverPendingCodeRows, ...localPendingCodeRows]))
+  const selectedSheetData = selectedSheet?.data || [];
+  const pendingCodeRows = Array.from(new Set(serverPendingCodeRows))
     .filter((rowIndex) => {
-      const row = selectedSheet?.data?.[rowIndex];
+      const row = selectedSheetData[rowIndex];
       if (!row) return true;
 
       const firstConfirmation = getCellExportText(row, FIRST_CONFIRMATION_COLUMN_INDEX);
@@ -2564,8 +2590,10 @@ function App() {
       return firstConfirmation && !itemCode;
     })
     .sort((left, right) => left - right);
+  const visitedPendingCodeSet = new Set(visitedPendingCodeRows);
+  const pendingCodeSet = new Set(pendingCodeRows);
   const unvisitedPendingCodeRows = pendingCodeRows.filter(
-    (rowIndex) => !visitedPendingCodeRows.includes(rowIndex)
+    (rowIndex) => !visitedPendingCodeSet.has(rowIndex)
   );
   const pendingCodeBadgeCount = unvisitedPendingCodeRows.length;
 
@@ -3581,7 +3609,7 @@ function App() {
                     <tr
                       key={rowIndex}
                       className={[
-                        pendingCodeRows.includes(rowIndex) ? "pending-code-row" : "",
+                        pendingCodeSet.has(rowIndex) ? "pending-code-row" : "",
                         pendingCodeCursor === rowIndex ? "pending-code-row-focused" : "",
                       ].filter(Boolean).join(" ")}
                       style={{ height: rowHeight }}

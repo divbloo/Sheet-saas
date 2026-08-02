@@ -69,5 +69,6 @@ const SheetRowSchema = new mongoose.Schema(
 
 SheetRowSchema.index({ sheetId: 1, rowIndex: 1 }, { unique: true });
 SheetRowSchema.index({ sheetId: 1, searchText: 1 });
+SheetRowSchema.index({ sheetId: 1, "cells.11.value": 1, "cells.12.value": 1, rowIndex: 1 });
 
 module.exports = mongoose.model("SheetRow", SheetRowSchema);
