@@ -55,6 +55,14 @@ const getCellText = (cells = [], colIndex) => {
   return String(cell || "").trim();
 };
 
+const rowNeedsCode = (cells = []) => {
+  const normalizedCells = normalizeRowCells(cells);
+  const firstConfirmation = getCellText(normalizedCells, FIRST_CONFIRMATION_COLUMN_INDEX);
+  const itemCode = getCellText(normalizedCells, TAX_ITEM_CODE_COLUMN_INDEX);
+
+  return Boolean(firstConfirmation && !itemCode);
+};
+
 const parseRequiredDate = (value) => {
   const date = new Date(String(value || ""));
   return Number.isNaN(date.getTime()) ? null : date;
@@ -857,7 +865,16 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     updatedRows.push(row);
   }
 
-  return { updatedCells, rowOwners: getRowOwnershipMap(updatedRows) };
+  const pendingCodeUpdates = updatedRows.map((row) => ({
+    rowIndex: row.rowIndex,
+    pending: rowNeedsCode(row.cells),
+  }));
+
+  return {
+    updatedCells,
+    rowOwners: getRowOwnershipMap(updatedRows),
+    pendingCodeUpdates,
+  };
 };
 
 const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value, formula, patches }) => {
@@ -899,7 +916,7 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
     changeType: primaryPatch.formula || String(primaryPatch.value || "").startsWith("=") ? "formula" : "value",
   });
 
-  const { rowOwners } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
+  const { rowOwners, pendingCodeUpdates } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
@@ -912,7 +929,7 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
 
   await sheet.save();
 
-  return { patches: normalizedPatches, rowOwners };
+  return { patches: normalizedPatches, rowOwners, pendingCodeUpdates };
 };
 
 const createChangeLog = async ({
@@ -1472,33 +1489,11 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
     const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
-    const itemCodeValuePath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.value`;
-    const itemCodeFormulaPath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.formula`;
     const candidateRows = await SheetRow.find({
       sheetId: sheet._id,
-      $and: [
-        {
-          $or: [
-            { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
-            { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
-          ],
-        },
-        {
-          $and: [
-            {
-              $or: [
-                { [itemCodeValuePath]: { $in: ["", null] } },
-                { [itemCodeValuePath]: { $exists: false } },
-              ],
-            },
-            {
-              $or: [
-                { [itemCodeFormulaPath]: { $in: ["", null] } },
-                { [itemCodeFormulaPath]: { $exists: false } },
-              ],
-            },
-          ],
-        },
+      $or: [
+        { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
+        { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
       ],
     })
       .sort({ rowIndex: 1 })
@@ -1506,13 +1501,7 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
       .lean();
 
     const rowIndexes = candidateRows
-      .filter((row) => {
-        const cells = normalizeRowCells(row.cells);
-        const firstConfirmation = getCellText(cells, FIRST_CONFIRMATION_COLUMN_INDEX);
-        const itemCode = getCellText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
-
-        return firstConfirmation && !itemCode;
-      })
+      .filter((row) => rowNeedsCode(row.cells))
       .map((row) => row.rowIndex);
 
     sendJson(req, res, { rowIndexes });
@@ -1788,10 +1777,15 @@ app.patch("/sheet/:id/cells", auth, async (req, res) => {
       formula,
       patches: editResult.patches,
       rowOwners: editResult.rowOwners,
+      pendingCodeUpdates: editResult.pendingCodeUpdates,
       updatedBy: req.user.email,
     });
 
-    res.json({ ok: true, rowOwners: editResult.rowOwners });
+    res.json({
+      ok: true,
+      rowOwners: editResult.rowOwners,
+      pendingCodeUpdates: editResult.pendingCodeUpdates,
+    });
   } catch (error) {
     console.error("Failed to update cell", error);
     res.status(error.statusCode || 500).json({ message: error.message || "Failed to update cell" });
@@ -2240,10 +2234,17 @@ io.on("connection", (socket) => {
         formula,
         patches: editResult.patches,
         rowOwners: editResult.rowOwners,
+        pendingCodeUpdates: editResult.pendingCodeUpdates,
         updatedBy: socket.user.email,
       });
 
-      if (typeof ack === "function") ack({ ok: true, rowOwners: editResult.rowOwners });
+      if (typeof ack === "function") {
+        ack({
+          ok: true,
+          rowOwners: editResult.rowOwners,
+          pendingCodeUpdates: editResult.pendingCodeUpdates,
+        });
+      }
     } catch (error) {
       console.error("Failed to update cell", error);
       socket.emit("socket-error", error.message || "Failed to update cell");

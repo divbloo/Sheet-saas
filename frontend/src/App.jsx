@@ -754,7 +754,12 @@ function App() {
     const data = await res.json();
 
     if (res.ok) {
-      setServerPendingCodeRows(Array.isArray(data.rowIndexes) ? data.rowIndexes : []);
+      setServerPendingCodeRows(
+        Array.from(new Set(Array.isArray(data.rowIndexes) ? data.rowIndexes : []))
+          .map(Number)
+          .filter(Number.isInteger)
+          .sort((left, right) => left - right)
+      );
     }
   };
 
@@ -1094,8 +1099,30 @@ function App() {
     ));
   };
 
+  const applyPendingCodeUpdates = (updates = []) => {
+    if (!Array.isArray(updates) || updates.length === 0) return;
+
+    setServerPendingCodeRows((rows) => {
+      const rowSet = new Set(rows);
+
+      updates.forEach((update) => {
+        const numericRowIndex = Number(update?.rowIndex);
+        if (!Number.isInteger(numericRowIndex)) return;
+
+        if (update.pending) {
+          rowSet.add(numericRowIndex);
+        } else {
+          rowSet.delete(numericRowIndex);
+        }
+      });
+
+      return Array.from(rowSet).sort((left, right) => left - right);
+    });
+  };
+
   const handleSocketSaveResult = (result) => {
     mergeRowOwners(result?.rowOwners);
+    applyPendingCodeUpdates(result?.pendingCodeUpdates);
 
     if (!result?.ok) {
       setSavingStatus("Unsaved changes...");
@@ -1157,6 +1184,7 @@ function App() {
     }
 
     mergeRowOwners(data.rowOwners);
+    applyPendingCodeUpdates(data.pendingCodeUpdates);
     setSavingStatus("Saved");
     setTimeout(() => setSavingStatus(""), 1200);
     return true;
@@ -2593,16 +2621,9 @@ function App() {
     return uniqueDescriptionValues(rows, fieldKey);
   };
 
-  const selectedSheetData = selectedSheet?.data || [];
   const pendingCodeRows = Array.from(new Set(serverPendingCodeRows))
-    .filter((rowIndex) => {
-      const row = selectedSheetData[rowIndex];
-      if (!row) return true;
-
-      const firstConfirmation = getCellExportText(row, FIRST_CONFIRMATION_COLUMN_INDEX);
-      const itemCode = getCellExportText(row, TAX_ITEM_CODE_COLUMN_INDEX);
-      return firstConfirmation && !itemCode;
-    })
+    .map(Number)
+    .filter(Number.isInteger)
     .sort((left, right) => left - right);
   const visitedPendingCodeSet = new Set(visitedPendingCodeRows);
   const pendingCodeSet = new Set(pendingCodeRows);
@@ -2715,12 +2736,14 @@ function App() {
 
     socketRef.current.on("presence-updated", setOnlineUsers);
 
-    socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches, rowOwners }) => {
+    socketRef.current.on("cell-change", ({ rowIndex, colIndex, value, formula, patches, rowOwners, pendingCodeUpdates }) => {
       const socketPatches = Array.isArray(patches) && patches.length > 0
         ? patches
         : [{ rowIndex, colIndex, value, formula }];
 
-      if (touchesPendingCodeColumns(socketPatches)) {
+      if (Array.isArray(pendingCodeUpdates) && pendingCodeUpdates.length > 0) {
+        applyPendingCodeUpdates(pendingCodeUpdates);
+      } else if (touchesPendingCodeColumns(socketPatches)) {
         Array.from(new Set(socketPatches.map((patch) => Number(patch.rowIndex)))).forEach((patchRowIndex) => {
           if (Number.isInteger(patchRowIndex)) {
             syncPendingCodeRowFromPatches(patchRowIndex, socketPatches);
