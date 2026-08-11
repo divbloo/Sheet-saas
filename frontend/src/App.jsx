@@ -1386,40 +1386,6 @@ function App() {
     }
   };
 
-  const syncPendingCodeRowFromPatches = (rowIndex, patches) => {
-    const touchesPendingState = patches.some(
-      (patch) =>
-        patch.colIndex === FIRST_CONFIRMATION_COLUMN_INDEX ||
-        patch.colIndex === TAX_ITEM_CODE_COLUMN_INDEX
-    );
-
-    if (!touchesPendingState) return;
-
-    const getNextValue = (colIndex) => {
-      const patch = patches.find((item) => (
-        Number(item.rowIndex) === Number(rowIndex) &&
-        Number(item.colIndex) === Number(colIndex)
-      ));
-      if (patch) return String(patch.formula || patch.value || "").trim();
-
-      return getCellExportText(selectedSheetRef.current?.data?.[rowIndex], colIndex);
-    };
-    const firstConfirmation = getNextValue(FIRST_CONFIRMATION_COLUMN_INDEX);
-    const itemCode = getNextValue(TAX_ITEM_CODE_COLUMN_INDEX);
-
-    setServerPendingCodeRows((rows) => {
-      const rowSet = new Set(rows);
-
-      if (firstConfirmation && !itemCode) {
-        rowSet.add(rowIndex);
-      } else {
-        rowSet.delete(rowIndex);
-      }
-
-      return Array.from(rowSet).sort((left, right) => left - right);
-    });
-  };
-
   const updateCell = (rowIndex, colIndex, inputValue) => {
     if (!canEditCell(rowIndex, colIndex)) {
       showMessage(getCellLockMessage(rowIndex, colIndex));
@@ -1464,7 +1430,6 @@ function App() {
       queueSave: !socketRef.current,
       recalculate: shouldRecalculateForPatches(patches),
     });
-    syncPendingCodeRowFromPatches(rowIndex, patches);
 
     if (selectedSheet) {
       queueCellSocketSave({
@@ -2630,7 +2595,7 @@ function App() {
   const unvisitedPendingCodeRows = pendingCodeRows.filter(
     (rowIndex) => !visitedPendingCodeSet.has(rowIndex)
   );
-  const pendingCodeBadgeCount = unvisitedPendingCodeRows.length;
+  const pendingCodeBadgeCount = pendingCodeRows.length;
 
   const selectedCellStyle = selectedCell && selectedSheet
     ? normalizeCell(selectedSheet.data?.[selectedCell.rowIndex]?.[selectedCell.colIndex]).style
@@ -2744,11 +2709,8 @@ function App() {
       if (Array.isArray(pendingCodeUpdates) && pendingCodeUpdates.length > 0) {
         applyPendingCodeUpdates(pendingCodeUpdates);
       } else if (touchesPendingCodeColumns(socketPatches)) {
-        Array.from(new Set(socketPatches.map((patch) => Number(patch.rowIndex)))).forEach((patchRowIndex) => {
-          if (Number.isInteger(patchRowIndex)) {
-            syncPendingCodeRowFromPatches(patchRowIndex, socketPatches);
-          }
-        });
+        const activeSheetId = selectedSheetRef.current?._id;
+        if (activeSheetId) void loadPendingCodeRows(activeSheetId);
       }
 
       setSelectedSheet((prev) => {

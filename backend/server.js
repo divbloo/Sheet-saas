@@ -818,6 +818,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
   const updatedCells = [];
   const updatedRows = [];
+  const changeLogs = [];
 
   for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
     const editsProtectedColumns = rowPatches.some(
@@ -829,6 +830,25 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
     rowPatches.forEach((patch) => {
       const currentCell = row.cells[patch.colIndex] || createCell("");
+      const oldValue = currentCell && typeof currentCell === "object"
+        ? currentCell.formula || currentCell.value || ""
+        : currentCell;
+      const newValue = patch.formula || patch.value || "";
+
+      if (String(oldValue ?? "") !== String(newValue ?? "")) {
+        changeLogs.push({
+          sheetId: sheet._id,
+          workspaceId: sheet.workspaceId || null,
+          userId: user.id,
+          userEmail: user.email,
+          rowIndex,
+          colIndex: patch.colIndex,
+          cellAddress: cellAddress(rowIndex, patch.colIndex),
+          oldValue,
+          newValue,
+          changeType: patch.formula || String(patch.value || "").startsWith("=") ? "formula" : "value",
+        });
+      }
 
       row.cells[patch.colIndex] = {
         ...currentCell,
@@ -865,6 +885,10 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     updatedRows.push(row);
   }
 
+  if (changeLogs.length > 0) {
+    await ChangeLog.insertMany(changeLogs);
+  }
+
   const pendingCodeUpdates = updatedRows.map((row) => ({
     rowIndex: row.rowIndex,
     pending: rowNeedsCode(row.cells),
@@ -881,10 +905,6 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   const normalizedPatches = Array.isArray(patches) && patches.length > 0
     ? patches.slice(0, 50)
     : [{ rowIndex, colIndex, value, formula }];
-  const primaryPatch = normalizedPatches[0] || { rowIndex, colIndex, value, formula };
-  const numericRowIndex = Number(rowIndex);
-  const numericColIndex = Number(colIndex);
-  const newValue = primaryPatch.formula || primaryPatch.value || "";
   const role = getUserRole(sheet, user.id);
 
   await migrateSheetRowsIfNeeded(sheet);
@@ -895,26 +915,6 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   ) {
     throw createTimeLockedColumnError();
   }
-
-  const editsProtectedColumns = normalizedPatches.some(
-    (patch) => Number(patch.colIndex) <= ROW_LOCK_LAST_COLUMN_INDEX
-  );
-  const oldRow = editsProtectedColumns
-    ? await ensureRowEditAccess(sheet, user, role, numericRowIndex)
-    : await ensureSheetRow(sheet._id, numericRowIndex);
-  const oldCell = oldRow.cells?.[numericColIndex] || "";
-  const oldValue =
-    oldCell && typeof oldCell === "object" ? oldCell.value : oldCell;
-
-  await createChangeLog({
-    sheet,
-    user,
-    rowIndex: numericRowIndex,
-    colIndex: numericColIndex,
-    oldValue,
-    newValue,
-    changeType: primaryPatch.formula || String(primaryPatch.value || "").startsWith("=") ? "formula" : "value",
-  });
 
   const { rowOwners, pendingCodeUpdates } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
 
@@ -1487,20 +1487,12 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
-    const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
-    const candidateRows = await SheetRow.find({
-      sheetId: sheet._id,
-      $or: [
-        { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
-        { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
-      ],
-    })
+    const rows = await SheetRow.find({ sheetId: sheet._id })
       .sort({ rowIndex: 1 })
       .select("rowIndex cells")
       .lean();
 
-    const rowIndexes = candidateRows
+    const rowIndexes = rows
       .filter((row) => rowNeedsCode(row.cells))
       .map((row) => row.rowIndex);
 
@@ -2052,7 +2044,11 @@ app.get("/sheet/:id/changes", auth, async (req, res) => {
       filter.colIndex = Number(req.query.colIndex);
     }
 
-    const changes = await ChangeLog.find(filter).sort({ createdAt: -1 }).limit(100);
+    const requestedLimit = Number(req.query.limit);
+    const limit = Number.isInteger(requestedLimit)
+      ? Math.min(Math.max(requestedLimit, 1), 500)
+      : 250;
+    const changes = await ChangeLog.find(filter).sort({ createdAt: -1 }).limit(limit);
 
     res.json(changes);
   } catch (error) {
