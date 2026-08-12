@@ -228,15 +228,6 @@ const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
-const countFormulaCellsInRow = (row = []) => normalizeRowCells(row)
-  .reduce((count, cell) => count + (cell.formula ? 1 : 0), 0);
-
-const buildRowDerivedFields = (row = []) => ({
-  hasContent: rowHasContent(row),
-  needsCode: rowNeedsCode(row),
-  formulaCount: countFormulaCellsInRow(row),
-});
-
 const createDefaultMeta = () => ({
   colWidths: { ...DEFAULT_COLUMN_WIDTHS },
   rowHeights: {},
@@ -584,11 +575,11 @@ const countFormulaCells = (data = []) => {
 };
 
 const countFormulaCellsInRows = async (sheetId) => {
-  await ensureSheetRowsDerivedFields(sheetId);
-
   const [result] = await SheetRow.aggregate([
     { $match: { sheetId: new mongoose.Types.ObjectId(sheetId) } },
-    { $group: { _id: null, count: { $sum: "$formulaCount" } } },
+    { $unwind: "$cells" },
+    { $match: { "cells.formula": { $nin: [null, ""] } } },
+    { $count: "count" },
   ]);
 
   return result?.count || 0;
@@ -616,7 +607,6 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
           rowIndex,
           cells: normalizeRowCells(row),
           searchText: buildRowSearchText(row),
-          ...buildRowDerivedFields(row),
           ownerId: hasContent ? sheet.createdBy : null,
           ownerEmail: hasContent ? owner?.email || "" : "",
           ownerUsername: hasContent ? owner?.username || owner?.email || "" : "",
@@ -636,27 +626,17 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
   await sheet.save();
 };
 
-const ensureSheetRowsDerivedFields = async (sheetId) => {
+const ensureSheetRowsSearchText = async (sheetId) => {
   const missingCount = await SheetRow.countDocuments({
     sheetId,
-    $or: [
-      { searchText: { $exists: false } },
-      { hasContent: { $exists: false } },
-      { needsCode: { $exists: false } },
-      { formulaCount: { $exists: false } },
-    ],
+    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
   });
 
   if (missingCount === 0) return;
 
   const cursor = SheetRow.find({
     sheetId,
-    $or: [
-      { searchText: { $exists: false } },
-      { hasContent: { $exists: false } },
-      { needsCode: { $exists: false } },
-      { formulaCount: { $exists: false } },
-    ],
+    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
   }).cursor();
   const operations = [];
 
@@ -664,12 +644,7 @@ const ensureSheetRowsDerivedFields = async (sheetId) => {
     operations.push({
       updateOne: {
         filter: { _id: row._id },
-        update: {
-          $set: {
-            searchText: buildRowSearchText(row.cells),
-            ...buildRowDerivedFields(row.cells),
-          },
-        },
+        update: { $set: { searchText: buildRowSearchText(row.cells) } },
       },
     });
 
@@ -718,7 +693,7 @@ const getSheetRowCount = async (sheetId) => {
 const getLastDataRowIndex = async (sheetId) => {
   const indexedRow = await SheetRow.findOne({
     sheetId,
-    hasContent: true,
+    searchText: { $regex: "\\S" },
   })
     .sort({ rowIndex: -1 })
     .select("rowIndex")
@@ -755,7 +730,6 @@ const ensureSheetRow = async (sheetId, rowIndex) => {
         rowIndex,
         cells: normalizeRowCells([]),
         searchText: "",
-        ...buildRowDerivedFields([]),
       },
     },
     { returnDocument: "after", upsert: true }
@@ -845,7 +819,6 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
   const updatedCells = [];
   const updatedRows = [];
   const changeLogs = [];
-  let formulaCountDelta = 0;
 
   for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
     const editsProtectedColumns = rowPatches.some(
@@ -854,7 +827,6 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     const row = editsProtectedColumns
       ? await ensureRowEditAccess(sheet, user, role, rowIndex)
       : await ensureSheetRow(sheet._id, rowIndex);
-    const previousFormulaCount = Number(row.formulaCount ?? countFormulaCellsInRow(row.cells));
 
     rowPatches.forEach((patch) => {
       const currentCell = row.cells[patch.colIndex] || createCell("");
@@ -897,11 +869,6 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     });
 
     row.searchText = buildRowSearchText(row.cells);
-    const derivedFields = buildRowDerivedFields(row.cells);
-    row.hasContent = derivedFields.hasContent;
-    row.needsCode = derivedFields.needsCode;
-    row.formulaCount = derivedFields.formulaCount;
-    formulaCountDelta += derivedFields.formulaCount - previousFormulaCount;
 
     if (editsProtectedColumns && !rowHasProtectedContent(row.cells)) {
       row.ownerId = null;
@@ -911,9 +878,6 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
     row.markModified("cells");
     row.markModified("searchText");
-    row.markModified("hasContent");
-    row.markModified("needsCode");
-    row.markModified("formulaCount");
     row.markModified("ownerId");
     row.markModified("ownerEmail");
     row.markModified("ownerUsername");
@@ -927,14 +891,13 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
   const pendingCodeUpdates = updatedRows.map((row) => ({
     rowIndex: row.rowIndex,
-    pending: Boolean(row.needsCode),
+    pending: rowNeedsCode(row.cells),
   }));
 
   return {
     updatedCells,
     rowOwners: getRowOwnershipMap(updatedRows),
     pendingCodeUpdates,
-    formulaCountDelta,
   };
 };
 
@@ -953,12 +916,12 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
     throw createTimeLockedColumnError();
   }
 
-  const { rowOwners, pendingCodeUpdates, formulaCountDelta } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
+  const { rowOwners, pendingCodeUpdates } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
     totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-    totalFormulaCells: Math.max(0, ((sheet.analytics && sheet.analytics.totalFormulaCells) || 0) + formulaCountDelta),
+    totalFormulaCells: await countFormulaCellsInRows(sheet._id),
     totalMergedCells: sheet.meta?.merges?.length || 0,
     lastEditedBy: user.email,
     lastEditedAt: new Date(),
@@ -1342,7 +1305,6 @@ app.post("/sheet", auth, async (req, res) => {
         rowIndex,
         cells: normalizeRowCells(row),
         searchText: buildRowSearchText(row),
-        ...buildRowDerivedFields(row),
         ownerId: req.user.id,
         ownerEmail: req.user.email,
         ownerUsername: req.user.username || req.user.email,
@@ -1397,7 +1359,6 @@ app.get("/sheet/:id", auth, async (req, res) => {
     }
 
     await migrateSheetRowsIfNeeded(sheet);
-    await ensureSheetRowsDerivedFields(sheet._id);
 
     if (!sheet.meta) sheet.meta = createDefaultMeta();
     if (!sheet.erpOptions) sheet.erpOptions = createDefaultErpOptions();
@@ -1485,7 +1446,7 @@ app.get("/sheet/:id/search", auth, async (req, res) => {
     }
 
     await migrateSheetRowsIfNeeded(sheet);
-    await ensureSheetRowsDerivedFields(sheet._id);
+    await ensureSheetRowsSearchText(sheet._id);
 
     const rowDocs = await SheetRow.find({
       sheetId: sheet._id,
@@ -1526,14 +1487,14 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    await ensureSheetRowsDerivedFields(sheet._id);
-
-    const rows = await SheetRow.find({ sheetId: sheet._id, needsCode: true })
+    const rows = await SheetRow.find({ sheetId: sheet._id })
       .sort({ rowIndex: 1 })
-      .select("rowIndex")
+      .select("rowIndex cells")
       .lean();
 
-    const rowIndexes = rows.map((row) => row.rowIndex);
+    const rowIndexes = rows
+      .filter((row) => rowNeedsCode(row.cells))
+      .map((row) => row.rowIndex);
 
     sendJson(req, res, { rowIndexes });
   } catch (error) {
@@ -1737,7 +1698,6 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
                   rowIndex: start + offset,
                   cells: normalizeRowCells(row),
                   searchText: buildRowSearchText(row),
-                  ...buildRowDerivedFields(row),
                   ownerId: hasContent ? req.user.id : null,
                   ownerEmail: hasContent ? req.user.email : "",
                   ownerUsername: hasContent ? req.user.username || req.user.email : "",
@@ -1859,15 +1819,8 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
       },
     };
     row.searchText = buildRowSearchText(row.cells);
-    const derivedFields = buildRowDerivedFields(row.cells);
-    row.hasContent = derivedFields.hasContent;
-    row.needsCode = derivedFields.needsCode;
-    row.formulaCount = derivedFields.formulaCount;
     row.markModified("cells");
     row.markModified("searchText");
-    row.markModified("hasContent");
-    row.markModified("needsCode");
-    row.markModified("formulaCount");
     await row.save();
 
     await createChangeLog({
@@ -2091,7 +2044,7 @@ app.get("/sheet/:id/changes", auth, async (req, res) => {
       filter.colIndex = Number(req.query.colIndex);
     }
 
-    const requestedLimit = Number.parseInt(req.query.limit, 10);
+    const requestedLimit = Number(req.query.limit);
     const limit = Number.isInteger(requestedLimit)
       ? Math.min(Math.max(requestedLimit, 1), 500)
       : 250;
