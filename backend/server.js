@@ -6,7 +6,6 @@ const http = require("http");
 const path = require("path");
 const mongoose = require("mongoose");
 const cors = require("cors");
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
@@ -17,8 +16,10 @@ const Sheet = require("./models/Sheet");
 const SheetRow = require("./models/SheetRow");
 const Workspace = require("./models/Workspace");
 const ChangeLog = require("./models/ChangeLog");
+const authRoutes = require("./routes/authRoutes");
+const profileRoutes = require("./routes/profileRoutes");
+const workspaceRoutes = require("./routes/workspaceRoutes");
 const {
-  authLimiter,
   createCorsOptions,
   createHelmetOptions,
   getFrontendUrls,
@@ -59,6 +60,19 @@ const {
   normalizeRowCells,
 } = require("./utils/sheetRows");
 const { createERPTemplateData } = require("./utils/erpTemplates");
+const { auth } = require("./utils/userHelpers");
+const {
+  canAssignSheetRole,
+  canBypassRowLocks,
+  canEdit,
+  canManage,
+  canManageSheetUsers,
+  canRead,
+  canRemoveSheetCollaborator,
+  canUseWorkspace,
+  getUserRole,
+  getWorkspaceRole,
+} = require("./utils/permissions");
 
 const app = express();
 const server = http.createServer(app);
@@ -150,105 +164,6 @@ const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
-const signToken = (user) => {
-  return jwt.sign(
-    {
-      id: user._id.toString(),
-      email: user.email,
-      username: user.username || user.email,
-      role: user.role || "user",
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-};
-
-const toUserResponse = (user) => ({
-  id: user._id,
-  email: user.email,
-  username: user.username || user.email,
-  role: user.role || "user",
-  avatarUrl: user.avatarUrl || "",
-});
-
-const normalizeUsername = (value) => {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .slice(0, 60);
-};
-
-const getDefaultUsername = (email) => String(email || "").split("@")[0] || "user";
-
-const normalizeAvatarUrl = (value) => {
-  const text = String(value || "").trim();
-  if (!text) return "";
-
-  if (!/^data:image\/(png|jpe?g|webp);base64,/i.test(text)) {
-    return null;
-  }
-
-  return text.length <= 2_500_000 ? text : null;
-};
-
-const createUniqueUsername = async (email, requestedUsername = "") => {
-  const base = normalizeUsername(requestedUsername) || getDefaultUsername(email);
-  let username = base;
-  let suffix = 2;
-
-  while (await User.exists({ username })) {
-    username = `${base}${suffix}`;
-    suffix += 1;
-  }
-
-  return username;
-};
-
-const auth = (req, res, next) => {
-  try {
-    const header = req.headers.authorization;
-
-    if (!header || !header.startsWith("Bearer ")) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
-
-    const token = header.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    req.user = decoded;
-    next();
-  } catch (error) {
-    return res.status(401).json({ message: "Invalid token" });
-  }
-};
-
-const getUserRole = (sheet, userId) => {
-  const collaborator = sheet.collaborators.find(
-    (item) => item.userId.toString() === userId.toString()
-  );
-
-  return collaborator ? collaborator.role : null;
-};
-
-const canRead = (role) => ["owner", "admin", "editor", "viewer"].includes(role);
-const canEdit = (role) => ["owner", "admin", "editor"].includes(role);
-const canManage = (role) => role === "owner";
-const canBypassRowLocks = (role) => role === "owner" || role === "admin";
-const canManageSheetUsers = (role) => ["owner", "admin"].includes(role);
-const canAssignSheetRole = (actorRole, currentRole, nextRole) => {
-  if (currentRole === "owner" || nextRole === "owner") return false;
-  if (actorRole === "owner") return ["admin", "editor", "viewer"].includes(nextRole);
-  if (actorRole === "admin") {
-    return currentRole !== "admin" && ["editor", "viewer"].includes(nextRole);
-  }
-  return false;
-};
-const canRemoveSheetCollaborator = (actorRole, targetRole) => {
-  if (targetRole === "owner") return false;
-  if (actorRole === "owner") return true;
-  return actorRole === "admin" && targetRole !== "admin";
-};
-
 const findSheetForUser = async (sheetId, userId) => {
   const sheet = await Sheet.findById(sheetId);
 
@@ -285,17 +200,6 @@ const hydrateCollaboratorUsernames = async (sheet) => {
 
   return changed;
 };
-
-const getWorkspaceRole = (workspace, userId) => {
-  const member = workspace.members.find(
-    (item) => item.userId.toString() === userId.toString()
-  );
-
-  return member ? member.role : null;
-};
-
-const canManageWorkspace = (role) => role === "admin";
-const canUseWorkspace = (role) => ["admin", "member", "viewer"].includes(role);
 
 const countFormulaCellsInRows = async (sheetId) => {
   const [result] = await SheetRow.aggregate([
@@ -698,282 +602,9 @@ app.get("/api/health", (req, res) => {
   res.json({ message: "Sheet SaaS API is running" });
 });
 
-/* AUTH */
-
-app.post("/signup", authLimiter, async (req, res) => {
-  try {
-    const email = String(req.body.email || "").toLowerCase().trim();
-    const password = String(req.body.password || "");
-    const username = normalizeUsername(req.body.username) || await createUniqueUsername(email);
-
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ message: "Password must be at least 6 characters" });
-    }
-
-    const existingUser = await User.findOne({ email });
-
-    if (existingUser) {
-      return res.status(409).json({ message: "User already exists" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const user = await User.create({
-      email,
-      password: hashedPassword,
-      username,
-      role: "user",
-    });
-
-    const token = signToken(user);
-
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: toUserResponse(user),
-    });
-  } catch (error) {
-    if (error?.code === 11000) {
-      return res.status(409).json({ message: "Email or username already exists" });
-    }
-    res.status(500).json({ message: "Signup failed" });
-  }
-});
-
-app.post("/login", authLimiter, async (req, res) => {
-  try {
-    const email = String(req.body.email || "").toLowerCase().trim();
-    const password = String(req.body.password || "");
-
-    if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
-    }
-
-    const user = await User.findOne({ email });
-
-    if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
-    }
-
-    const isPasswordCorrect = await bcrypt.compare(password, user.password);
-
-    if (!isPasswordCorrect) {
-      return res.status(401).json({ message: "Invalid email or password" });
-    }
-
-    const token = signToken(user);
-
-    res.json({
-      message: "Login successful",
-      token,
-      user: toUserResponse(user),
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Login failed" });
-  }
-});
-
-app.get("/me", auth, async (req, res) => {
-  const user = await User.findById(req.user.id);
-
-  if (!user) {
-    return res.status(404).json({ message: "User not found" });
-  }
-
-  res.json({ user: toUserResponse(user) });
-});
-
-app.patch("/me", auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const email = String(req.body.email || user.email).toLowerCase().trim();
-    const username = normalizeUsername(req.body.username) || user.username || getDefaultUsername(email);
-    const avatarUrl = normalizeAvatarUrl(req.body.avatarUrl);
-
-    if (!email || !email.includes("@")) {
-      return res.status(400).json({ message: "Valid email is required" });
-    }
-
-    if (username.length < 2) {
-      return res.status(400).json({ message: "Username must be at least 2 characters" });
-    }
-
-    if (avatarUrl === null) {
-      return res.status(400).json({ message: "Profile image must be PNG, JPG, or WEBP and under 2 MB" });
-    }
-
-    const existingEmail = await User.findOne({ email, _id: { $ne: user._id } });
-    if (existingEmail) {
-      return res.status(409).json({ message: "Email already exists" });
-    }
-
-    const existingUsername = await User.findOne({ username, _id: { $ne: user._id } });
-    if (existingUsername) {
-      return res.status(409).json({ message: "Username already exists" });
-    }
-
-    const oldEmail = user.email;
-    const oldUsername = user.username;
-    user.email = email;
-    user.username = username;
-    user.avatarUrl = avatarUrl;
-    await user.save();
-
-    if (oldEmail !== email || oldUsername !== username) {
-      await Promise.all([
-        Sheet.updateMany(
-          { "collaborators.userId": user._id },
-          {
-            $set: {
-              "collaborators.$[member].email": email,
-              "collaborators.$[member].username": username,
-            },
-          },
-          { arrayFilters: [{ "member.userId": user._id }] }
-        ),
-        Workspace.updateMany(
-          { "members.userId": user._id },
-          { $set: { "members.$[member].email": email } },
-          { arrayFilters: [{ "member.userId": user._id }] }
-        ),
-      ]);
-    }
-
-    res.json({
-      user: toUserResponse(user),
-      token: signToken(user),
-    });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to update profile" });
-  }
-});
-
-app.patch("/me/password", authLimiter, auth, async (req, res) => {
-  try {
-    const currentPassword = String(req.body.currentPassword || "");
-    const newPassword = String(req.body.newPassword || "");
-
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: "Current and new password are required" });
-    }
-
-    if (newPassword.length < 6) {
-      return res.status(400).json({ message: "Password must be at least 6 characters" });
-    }
-
-    const user = await User.findById(req.user.id);
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const isPasswordCorrect = await bcrypt.compare(currentPassword, user.password);
-
-    if (!isPasswordCorrect) {
-      return res.status(401).json({ message: "Current password is incorrect" });
-    }
-
-    user.password = await bcrypt.hash(newPassword, 10);
-    await user.save();
-
-    res.json({ ok: true });
-  } catch (error) {
-    res.status(500).json({ message: "Failed to change password" });
-  }
-});
-
-/* WORKSPACES */
-
-app.post("/workspaces", auth, async (req, res) => {
-  try {
-    const workspace = await Workspace.create({
-      name: req.body.name || "My Workspace",
-      ownerId: req.user.id,
-      members: [
-        {
-          userId: req.user.id,
-          email: req.user.email,
-          role: "admin",
-        },
-      ],
-    });
-
-    res.status(201).json(workspace);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to create workspace" });
-  }
-});
-
-app.get("/workspaces", auth, async (req, res) => {
-  try {
-    const workspaces = await Workspace.find({
-      "members.userId": req.user.id,
-    }).sort({ updatedAt: -1 });
-
-    res.json(workspaces);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to get workspaces" });
-  }
-});
-
-app.post("/workspaces/:id/members", auth, async (req, res) => {
-  try {
-    const workspace = await Workspace.findById(req.params.id);
-
-    if (!workspace) {
-      return res.status(404).json({ message: "Workspace not found" });
-    }
-
-    const role = getWorkspaceRole(workspace, req.user.id);
-
-    if (!canManageWorkspace(role)) {
-      return res.status(403).json({ message: "Only workspace admin can add members" });
-    }
-
-    const email = String(req.body.email || "").toLowerCase().trim();
-    const memberRole = req.body.role || "member";
-
-    if (!["admin", "member", "viewer"].includes(memberRole)) {
-      return res.status(400).json({ message: "Invalid role" });
-    }
-
-    const user = await User.findOne({ email });
-
-    if (!user) {
-      return res.status(404).json({ message: "User must sign up first" });
-    }
-
-    const existing = workspace.members.find(
-      (item) => item.userId.toString() === user._id.toString()
-    );
-
-    if (existing) {
-      existing.role = memberRole;
-      existing.email = user.email;
-    } else {
-      workspace.members.push({
-        userId: user._id,
-        email: user.email,
-        role: memberRole,
-      });
-    }
-
-    await workspace.save();
-
-    res.json(workspace);
-  } catch (error) {
-    res.status(500).json({ message: "Failed to add workspace member" });
-  }
-});
+app.use(authRoutes);
+app.use(profileRoutes);
+app.use(workspaceRoutes);
 
 /* SHEETS */
 

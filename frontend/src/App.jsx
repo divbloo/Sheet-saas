@@ -16,10 +16,7 @@ import {
   DEFAULT_ROW_HEIGHT,
   DEFAULT_COLUMN_WIDTHS,
   EXPORT_ROW_BATCH_SIZE,
-  CAIRO_TIMEZONE,
   FIRST_CONFIRMATION_COLUMN_INDEX,
-  FIRST_CONFIRMATION_EDIT_END_MINUTE,
-  FIRST_CONFIRMATION_EDIT_START_MINUTE,
   IMPORT_BATCH_SIZE,
   INITIAL_VISIBLE_ROWS,
   ROW_LOAD_STEP,
@@ -42,6 +39,13 @@ import {
   normalizeSheet,
   recalculateData,
 } from "./utils/spreadsheetData";
+import {
+  formatCairoDateTimeInput,
+  getCairoDateDaysAgo,
+  getDefaultTaxExportPeriod,
+  isFirstConfirmationEditOpen,
+} from "./utils/cairoTime";
+import useAppApi from "./hooks/useAppApi";
 import "./App.css";
 
 const TAX_EXPORT_HEADERS = [
@@ -64,44 +68,6 @@ const TAX_ACTIVE_FROM_DAYS_AGO = 5;
 const TAX_EXPORT_FILE_NAME = "NewCodeBulkTemplate (2).xlsx";
 const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
 const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
-
-const padDatePart = (value) => String(value).padStart(2, "0");
-
-const getCairoDateTimeParts = (date = new Date()) => {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: CAIRO_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-
-  return Object.fromEntries(parts.map((part) => [part.type, part.value]));
-};
-
-const formatCairoDateTimeInput = (date = new Date()) => {
-  const parts = getCairoDateTimeParts(date);
-  const hour = String(Number(parts.hour || 0) % 24);
-
-  return [
-    parts.year,
-    padDatePart(parts.month),
-    padDatePart(parts.day),
-  ].join("-") + "T" + [padDatePart(hour), padDatePart(parts.minute)].join(":");
-};
-
-const getDefaultTaxExportPeriod = () => {
-  const now = new Date();
-  const parts = getCairoDateTimeParts(now);
-  const date = [parts.year, padDatePart(parts.month), padDatePart(parts.day)].join("-");
-
-  return {
-    from: date + "T00:00",
-    to: formatCairoDateTimeInput(now),
-  };
-};
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -150,9 +116,9 @@ function App() {
   const [shareEmail, setShareEmail] = useState("");
   const [shareRole, setShareRole] = useState("viewer");
   const [onlineUsers, setOnlineUsers] = useState([]);
-  const [message, setMessage] = useState("");
   const [savingStatus, setSavingStatus] = useState("");
   const [connectionStatus, setConnectionStatus] = useState(token ? "connecting" : "offline");
+  const { authFetch, message, showMessage } = useAppApi();
 
   const [changesPanelOpen, setChangesPanelOpen] = useState(false);
   const [cellChanges, setCellChanges] = useState([]);
@@ -195,27 +161,9 @@ function App() {
   const canBypassRowLocks = role === "owner" || role === "admin";
   const firstConfirmationLockMessage = "First Confirmation can only be edited from 8:00 AM to 3:30 PM Cairo time";
 
-  const cairoTimeMinutes = () => {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: CAIRO_TIMEZONE,
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).formatToParts(new Date());
-    const hour = Number(parts.find((part) => part.type === "hour")?.value || 0) % 24;
-    const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
-
-    return (hour * 60) + minute;
-  };
-
   const isFirstConfirmationColumn = (colIndex) => colIndex === FIRST_CONFIRMATION_COLUMN_INDEX;
   const isRowLoaded = (rowIndex) => Array.isArray(selectedSheet?.data?.[rowIndex]);
   const getSheetCell = (rowIndex, colIndex) => normalizeCell(selectedSheet?.data?.[rowIndex]?.[colIndex]);
-  const isFirstConfirmationEditOpen = () => {
-    const minutes = cairoTimeMinutes();
-
-    return minutes >= FIRST_CONFIRMATION_EDIT_START_MINUTE && minutes <= FIRST_CONFIRMATION_EDIT_END_MINUTE;
-  };
 
   const canEditProtectedRow = (rowIndex) => {
     if (!canEdit) return false;
@@ -376,24 +324,6 @@ function App() {
     } finally {
       closeContextMenu();
     }
-  };
-
-  const showMessage = (text) => {
-    setMessage(text);
-    setTimeout(() => setMessage(""), 3500);
-  };
-
-  const authFetch = (url, options = {}) => {
-    const savedToken = sessionStorage.getItem("token");
-
-    return fetch(url, {
-      ...options,
-      headers: {
-        "Content-Type": "application/json",
-        ...(options.headers || {}),
-        Authorization: "Bearer " + savedToken,
-      },
-    });
   };
 
   const handleAuth = async () => {
@@ -1571,22 +1501,6 @@ function App() {
   const parseExportRowNumber = (value, fallback) => {
     const text = String(value ?? "").trim() || String(fallback);
     return /^\d+$/.test(text) ? Number(text) : NaN;
-  };
-
-  const getCairoDateDaysAgo = (daysAgo) => {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone: CAIRO_TIMEZONE,
-      year: "numeric",
-      month: "numeric",
-      day: "numeric",
-    }).formatToParts(new Date());
-    const year = Number(parts.find((part) => part.type === "year")?.value || 1970);
-    const month = Number(parts.find((part) => part.type === "month")?.value || 1);
-    const day = Number(parts.find((part) => part.type === "day")?.value || 1);
-    const date = new Date(year, month - 1, day, 12, 0, 0, 0);
-
-    date.setDate(date.getDate() - daysAgo);
-    return date;
   };
 
   const getCellExportText = (row, colIndex) => {
