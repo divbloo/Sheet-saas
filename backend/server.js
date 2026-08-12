@@ -512,18 +512,6 @@ const findSheetForUser = async (sheetId, userId) => {
   return { sheet, role };
 };
 
-const findSheetForUserProjected = async (sheetId, userId, projection) => {
-  const sheet = await Sheet.findById(sheetId, projection);
-
-  if (!sheet) {
-    return { sheet: null, role: null };
-  }
-
-  const role = getUserRole(sheet, userId);
-
-  return { sheet, role };
-};
-
 const hydrateCollaboratorUsernames = async (sheet) => {
   if (!sheet?.collaborators?.some((collaborator) => !collaborator.username)) return false;
 
@@ -560,20 +548,6 @@ const getWorkspaceRole = (workspace, userId) => {
 const canManageWorkspace = (role) => role === "admin";
 const canUseWorkspace = (role) => ["admin", "member", "viewer"].includes(role);
 
-const countFormulaCells = (data = []) => {
-  let count = 0;
-
-  data.forEach((row) => {
-    row.forEach((cell) => {
-      if (cell && typeof cell === "object" && cell.formula) {
-        count += 1;
-      }
-    });
-  });
-
-  return count;
-};
-
 const countFormulaCellsInRows = async (sheetId) => {
   const [result] = await SheetRow.aggregate([
     { $match: { sheetId: new mongoose.Types.ObjectId(sheetId) } },
@@ -585,20 +559,27 @@ const countFormulaCellsInRows = async (sheetId) => {
   return result?.count || 0;
 };
 
+const getFormulaCellCount = async (sheet) => {
+  const cachedCount = Number(sheet.analytics?.totalFormulaCells);
+
+  return Number.isFinite(cachedCount)
+    ? cachedCount
+    : countFormulaCellsInRows(sheet._id);
+};
+
 const migrateSheetRowsIfNeeded = async (sheet) => {
   if (!sheet) return;
-
-  const existingRowCount = await SheetRow.countDocuments({ sheetId: sheet._id });
-  if (existingRowCount > 0) return;
 
   const sourceRows = Array.isArray(sheet.data) ? sheet.data : [];
   if (sourceRows.length === 0) return;
 
-  if (sourceRows.length > 0) {
-    const owner = sheet.collaborators?.find((collaborator) => collaborator.role === "owner");
+  const existingRowCount = await SheetRow.countDocuments({ sheetId: sheet._id });
+  if (existingRowCount > 0) return;
 
-    try {
-      await SheetRow.insertMany(
+  const owner = sheet.collaborators?.find((collaborator) => collaborator.role === "owner");
+
+  try {
+    await SheetRow.insertMany(
       sourceRows.map((row, rowIndex) => {
         const hasContent = rowHasProtectedContent(row);
 
@@ -612,12 +593,11 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
           ownerUsername: hasContent ? owner?.username || owner?.email || "" : "",
         };
       }),
-        { ordered: false }
-      );
-    } catch (error) {
-      if (error?.code !== 11000 && error?.name !== "MongoBulkWriteError") {
-        throw error;
-      }
+      { ordered: false }
+    );
+  } catch (error) {
+    if (error?.code !== 11000 && error?.name !== "MongoBulkWriteError") {
+      throw error;
     }
   }
 
@@ -637,7 +617,9 @@ const ensureSheetRowsSearchText = async (sheetId) => {
   const cursor = SheetRow.find({
     sheetId,
     $or: [{ searchText: { $exists: false } }, { searchText: "" }],
-  }).cursor();
+  })
+    .select("cells")
+    .cursor();
   const operations = [];
 
   for await (const row of cursor) {
@@ -662,6 +644,7 @@ const ensureSheetRowsSearchText = async (sheetId) => {
 const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE) => {
   const rows = await SheetRow.find({ sheetId, rowIndex: { $gte: start, $lt: start + limit } })
     .sort({ rowIndex: 1 })
+    .select("rowIndex cells ownerId ownerEmail ownerUsername")
     .lean();
   const rowMap = new Map(rows.map((row) => [row.rowIndex, normalizeRowCells(row.cells)]));
   const rowOwners = Object.fromEntries(
@@ -923,9 +906,7 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   }
 
   const { rowOwners, pendingCodeUpdates, formulaCountDelta } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
-  const currentFormulaCells = Number.isFinite(Number(sheet.analytics?.totalFormulaCells))
-    ? Number(sheet.analytics.totalFormulaCells)
-    : await countFormulaCellsInRows(sheet._id);
+  const currentFormulaCells = await getFormulaCellCount(sheet);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
@@ -1369,11 +1350,20 @@ app.get("/sheet/:id", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    if (!sheet.meta) sheet.meta = createDefaultMeta();
-    if (!sheet.erpOptions) sheet.erpOptions = createDefaultErpOptions();
-    await hydrateCollaboratorUsernames(sheet);
+    let sheetChanged = false;
+    if (!sheet.meta) {
+      sheet.meta = createDefaultMeta();
+      sheetChanged = true;
+    }
+    if (!sheet.erpOptions) {
+      sheet.erpOptions = createDefaultErpOptions();
+      sheetChanged = true;
+    }
+    sheetChanged = await hydrateCollaboratorUsernames(sheet) || sheetChanged;
 
-    await sheet.save();
+    if (sheetChanged) {
+      await sheet.save();
+    }
 
     const totalRows = await getSheetRowCount(req.params.id);
     const lastDataRowIndex = focusLastDataRow ? await getLastDataRowIndex(sheet._id) : 0;
@@ -1463,6 +1453,7 @@ app.get("/sheet/:id/search", auth, async (req, res) => {
     })
       .sort({ rowIndex: 1 })
       .limit(limit)
+      .select("rowIndex cells")
       .lean();
     const matches = [];
 
@@ -1565,7 +1556,9 @@ app.get("/sheet/:id/tax-export-rows", auth, async (req, res) => {
     const rows = await SheetRow.find({
       sheetId: sheet._id,
       rowIndex: { $in: rowIndexes },
-    }).lean();
+    })
+      .select("rowIndex cells")
+      .lean();
 
     const taxRows = rows
       .map((row) => ({
@@ -1617,6 +1610,7 @@ app.get("/sheet/:id/export.csv", auth, async (req, res) => {
     const safeName = String(sheet.name || "sheet").replace(/[^\w.-]+/g, "_");
     const cursor = SheetRow.find({ sheetId: sheet._id })
       .sort({ rowIndex: 1 })
+      .select("cells")
       .lean()
       .cursor();
 
@@ -1835,9 +1829,7 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
         ...(style || {}),
       },
     };
-    row.searchText = buildRowSearchText(row.cells);
     row.markModified("cells");
-    row.markModified("searchText");
     await row.save();
 
     await createChangeLog({
@@ -1853,7 +1845,7 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
     sheet.analytics = {
       ...(sheet.analytics || {}),
       totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+      totalFormulaCells: await getFormulaCellCount(sheet),
       totalMergedCells: sheet.meta?.merges?.length || 0,
       lastEditedBy: req.user.email,
       lastEditedAt: new Date(),
@@ -2322,7 +2314,7 @@ io.on("connection", (socket) => {
       sheet.analytics = {
         ...(sheet.analytics || {}),
         totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-        totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+        totalFormulaCells: await getFormulaCellCount(sheet),
         totalMergedCells: sheet.meta?.merges?.length || 0,
         lastEditedBy: socket.user.email,
         lastEditedAt: new Date(),

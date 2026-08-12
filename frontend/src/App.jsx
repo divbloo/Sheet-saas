@@ -98,6 +98,14 @@ const getDefaultTaxExportPeriod = () => {
   };
 };
 
+const createEmptyCell = () => ({
+  value: "",
+  formula: "",
+  style: { ...defaultCellStyle },
+});
+
+const createEmptyRow = () => Array.from({ length: COLS }, createEmptyCell);
+
 function App() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
@@ -300,8 +308,6 @@ function App() {
       style: { ...defaultCellStyle },
     };
   };
-
-  const createEmptyRow = () => Array.from({ length: COLS }, () => normalizeCell(""));
 
   const normalizeData = (data = [], minRows = MIN_SHEET_ROWS) => {
     return Array.from({ length: Math.max(minRows, data.length) }, (_, r) => {
@@ -2566,35 +2572,60 @@ function App() {
     return sheets.filter((sheet) => sheet.name.toLowerCase().includes(query));
   }, [sheetSearch, sheets]);
 
-  const descriptionOptions = descriptionBuilder.open ? itemDescriptionOptions || {} : {};
-  const descriptionTypes = Object.keys(descriptionOptions);
+  const descriptionOptions = useMemo(
+    () => (descriptionBuilder.open ? itemDescriptionOptions || {} : {}),
+    [descriptionBuilder.open, itemDescriptionOptions]
+  );
+  const descriptionTypes = useMemo(() => Object.keys(descriptionOptions), [descriptionOptions]);
   const descriptionTypeOptions = descriptionOptions[descriptionBuilder.type] || EMPTY_DESCRIPTION_OPTIONS;
-  const descriptionRows = descriptionBuilder.open ? descriptionTypeOptions.rows || [] : [];
-  const descriptionCategoryOptions = descriptionBuilder.open
-    ? uniqueDescriptionValues(descriptionRows, "category")
-    : [];
-  const descriptionFilteredRows = descriptionBuilder.open
-    ? descriptionRows.filter((row) => {
-        if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+  const descriptionRows = useMemo(
+    () => (descriptionBuilder.open ? descriptionTypeOptions.rows || [] : []),
+    [descriptionBuilder.open, descriptionTypeOptions.rows]
+  );
+  const descriptionFilterEntries = useMemo(
+    () => Object.entries(descriptionBuilder.filters),
+    [descriptionBuilder.filters]
+  );
+  const descriptionCategoryOptions = useMemo(
+    () => (descriptionBuilder.open ? uniqueDescriptionValues(descriptionRows, "category") : []),
+    [descriptionBuilder.open, descriptionRows]
+  );
+  const descriptionFilteredRows = useMemo(() => {
+    if (!descriptionBuilder.open) return [];
 
-        return Object.entries(descriptionBuilder.filters).every(([key, value]) => !value || row[key] === value);
-      })
-    : [];
+    return descriptionRows.filter((row) => {
+      if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+
+      return descriptionFilterEntries.every(([key, value]) => !value || row[key] === value);
+    });
+  }, [descriptionBuilder.open, descriptionBuilder.category, descriptionRows, descriptionFilterEntries]);
   const selectedDescriptionRow =
     descriptionFilteredRows.find((row) => row.combination === descriptionBuilder.combination) ||
     (descriptionFilteredRows.length === 1 ? descriptionFilteredRows[0] : null);
+  const descriptionFieldOptionsByKey = useMemo(() => {
+    if (!descriptionBuilder.open) return {};
 
-  const getDescriptionFieldOptions = (fieldKey) => {
-    const rows = descriptionRows.filter((row) => {
-      if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+    return Object.fromEntries(
+      (descriptionTypeOptions.fields || []).map((field) => {
+        const rows = descriptionRows.filter((row) => {
+          if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
 
-      return Object.entries(descriptionBuilder.filters).every(
-        ([key, value]) => key === fieldKey || !value || row[key] === value
-      );
-    });
+          return descriptionFilterEntries.every(
+            ([key, value]) => key === field.key || !value || row[key] === value
+          );
+        });
 
-    return uniqueDescriptionValues(rows, fieldKey);
-  };
+        return [field.key, uniqueDescriptionValues(rows, field.key)];
+      })
+    );
+  }, [
+    descriptionBuilder.open,
+    descriptionBuilder.category,
+    descriptionTypeOptions.fields,
+    descriptionRows,
+    descriptionFilterEntries,
+  ]);
+  const getDescriptionFieldOptions = (fieldKey) => descriptionFieldOptionsByKey[fieldKey] || [];
 
   const pendingCodeRows = Array.from(new Set(serverPendingCodeRows))
     .map(Number)
@@ -2627,10 +2658,12 @@ function App() {
     Math.floor(gridScrollTop / DEFAULT_ROW_HEIGHT) - VIRTUAL_ROW_BUFFER
   );
   const virtualRowEnd = Math.min(visibleRows, virtualRowStart + VIRTUAL_ROW_WINDOW);
-  const renderedRows = Array.from(
-    { length: Math.max(0, virtualRowEnd - virtualRowStart) },
-    (_, offset) => selectedSheet?.data?.[virtualRowStart + offset] || createEmptyRow()
-  );
+  const renderedRows = useMemo(() => (
+    Array.from(
+      { length: Math.max(0, virtualRowEnd - virtualRowStart) },
+      (_, offset) => selectedSheet?.data?.[virtualRowStart + offset] || createEmptyRow()
+    )
+  ), [selectedSheet?.data, virtualRowStart, virtualRowEnd]);
   const topSpacerHeight = virtualRowStart * DEFAULT_ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(0, visibleRows - virtualRowEnd) * DEFAULT_ROW_HEIGHT;
 
