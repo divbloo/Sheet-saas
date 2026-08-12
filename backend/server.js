@@ -896,20 +896,30 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
     const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
-    const candidateRows = await SheetRow.find({
+    const itemCodeValuePath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.value`;
+    const itemCodeFormulaPath = `cells.${TAX_ITEM_CODE_COLUMN_INDEX}.formula`;
+    const pendingRows = await SheetRow.find({
       sheetId: sheet._id,
-      $or: [
-        { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
-        { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
+      $and: [
+        {
+          $or: [
+            { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
+            { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
+          ],
+        },
+        {
+          $and: [
+            { $or: [{ [itemCodeValuePath]: { $exists: false } }, { [itemCodeValuePath]: { $in: ["", null] } }] },
+            { $or: [{ [itemCodeFormulaPath]: { $exists: false } }, { [itemCodeFormulaPath]: { $in: ["", null] } }] },
+          ],
+        },
       ],
     })
       .sort({ rowIndex: 1 })
-      .select("rowIndex cells")
+      .select("rowIndex")
       .lean();
 
-    const rowIndexes = candidateRows
-      .filter((row) => rowNeedsCode(row.cells))
-      .map((row) => row.rowIndex);
+    const rowIndexes = pendingRows.map((row) => row.rowIndex);
 
     sendJson(req, res, { rowIndexes });
   } catch (error) {

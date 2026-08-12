@@ -145,6 +145,7 @@ function App() {
 
   const socketRef = useRef(null);
   const selectedSheetRef = useRef(null);
+  const didLoadInitialWorkspaceSheetsRef = useRef(false);
   const saveTimerRef = useRef(null);
   const cellSaveTimerRef = useRef(null);
   const cellSaveInFlightRef = useRef(false);
@@ -374,6 +375,8 @@ function App() {
         avatarUrl: data.user?.avatarUrl || "",
       });
     }
+
+    return data;
   };
 
   const saveProfile = async () => {
@@ -508,6 +511,12 @@ function App() {
     if (res.ok) setAnalytics(data);
   };
 
+  const refreshAnalyticsIfAdmin = async (user = currentUser) => {
+    if (user?.role === "admin") {
+      await loadAnalytics();
+    }
+  };
+
   const loadErpOptions = async (sheetId) => {
     const res = await authFetch(API_URL + "/sheet/" + sheetId + "/erp-options");
     const data = await res.json();
@@ -556,7 +565,7 @@ function App() {
     setSheetName("");
     setErpType("custom");
     await loadSheets();
-    await loadAnalytics();
+    await refreshAnalyticsIfAdmin();
     await openSheet(data._id);
     setMenuOpen(false);
   };
@@ -732,7 +741,7 @@ function App() {
     setSelectedSheet(null);
     setRole(null);
     await loadSheets();
-    await loadAnalytics();
+    await refreshAnalyticsIfAdmin();
     showMessage("Sheet deleted successfully");
   };
 
@@ -2216,7 +2225,7 @@ function App() {
     ));
     setSavingStatus("Saved");
     if (!silent) showMessage("Sheet saved");
-    await loadAnalytics();
+    await refreshAnalyticsIfAdmin();
 
     setTimeout(() => setSavingStatus(""), 1500);
   };
@@ -2700,7 +2709,9 @@ function App() {
     if (!token) return;
 
     const loadInitialData = async () => {
-      await Promise.all([loadMe(), loadWorkspaces(), loadSheets(), loadAnalytics()]);
+      didLoadInitialWorkspaceSheetsRef.current = true;
+      const [profile] = await Promise.all([loadMe(), loadWorkspaces(), loadSheets()]);
+      await refreshAnalyticsIfAdmin(profile?.user);
     };
 
     void loadInitialData();
@@ -2709,6 +2720,10 @@ function App() {
 
   useEffect(() => {
     if (!token) return;
+    if (didLoadInitialWorkspaceSheetsRef.current) {
+      didLoadInitialWorkspaceSheetsRef.current = false;
+      return;
+    }
 
     const loadWorkspaceSheets = async () => {
       await loadSheets();
