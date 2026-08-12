@@ -1,17 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import ItemDescriptionBuilderModal from "./components/ItemDescriptionBuilderModal";
 import defaultErpOptions from "./defaultErpOptions.json";
 import {
   API_URL,
   AUTO_COLUMN_LIMITS,
   AUTO_FIT_SAMPLE_ROWS,
   AUTO_REFRESH_INTERVAL_MS,
-  AVERAGE_CHAR_WIDTH,
   CELL_HORIZONTAL_PADDING,
   CELL_SAVE_DEBOUNCE_MS,
   CELL_VERTICAL_PADDING,
   COLS,
-  COLUMN_WIDTH_PADDING,
   CONTEXT_MENU_MARGIN,
   DEFAULT_LINE_HEIGHT,
   DEFAULT_ROW_HEIGHT,
@@ -23,20 +22,26 @@ import {
   FIRST_CONFIRMATION_EDIT_START_MINUTE,
   IMPORT_BATCH_SIZE,
   INITIAL_VISIBLE_ROWS,
-  LEGACY_PACKAGE_COLUMN_INDEX,
-  MIN_SHEET_ROWS,
   ROW_LOAD_STEP,
   ROW_LOCK_LAST_COLUMN_INDEX,
   VIRTUAL_ROW_BUFFER,
   VIRTUAL_ROW_WINDOW,
   clamp,
   defaultCellStyle,
-  defaultMeta,
-  erpArabicHeaders,
   normalizeRowTotal,
   rowPalette,
-  visibleErpHeaders,
 } from "./spreadsheetConfig";
+import {
+  cellAddress,
+  colName,
+  createEmptyRow,
+  estimateTextWidth,
+  evaluateFormula,
+  normalizeCell,
+  normalizeData,
+  normalizeSheet,
+  recalculateData,
+} from "./utils/spreadsheetData";
 import "./App.css";
 
 const TAX_EXPORT_HEADERS = [
@@ -97,14 +102,6 @@ const getDefaultTaxExportPeriod = () => {
     to: formatCairoDateTimeInput(now),
   };
 };
-
-const createEmptyCell = () => ({
-  value: "",
-  formula: "",
-  style: { ...defaultCellStyle },
-});
-
-const createEmptyRow = () => Array.from({ length: COLS }, createEmptyCell);
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -284,78 +281,6 @@ function App() {
     return defaultErpOptions.supportGroups?.[subGroup] || [];
   };
 
-  const normalizeCell = (cell) => {
-    if (typeof cell === "object" && cell !== null && "value" in cell) {
-      const incomingStyle = cell.style || {};
-
-      return {
-        value: cell.value || "",
-        formula: cell.formula || "",
-        style: {
-          ...defaultCellStyle,
-          ...incomingStyle,
-          textAlign:
-            !incomingStyle.textAlign || incomingStyle.textAlign === "left"
-              ? defaultCellStyle.textAlign
-              : incomingStyle.textAlign,
-        },
-      };
-    }
-
-    return {
-      value: cell || "",
-      formula: "",
-      style: { ...defaultCellStyle },
-    };
-  };
-
-  const normalizeData = (data = [], minRows = MIN_SHEET_ROWS) => {
-    return Array.from({ length: Math.max(minRows, data.length) }, (_, r) => {
-      const row = data[r] || [];
-      const sourceRow =
-        row.length > COLS
-          ? row.filter((_, index) => index !== LEGACY_PACKAGE_COLUMN_INDEX)
-          : row;
-
-      return Array.from({ length: COLS }, (_, c) =>
-        normalizeCell(sourceRow[c] || "")
-      );
-    });
-  };
-
-  const normalizeSheet = (sheet, options = {}) => ({
-    ...sheet,
-    data: normalizeData(sheet.data, options.minRows ?? MIN_SHEET_ROWS),
-    rowOwners: { ...(sheet.rowOwners || {}) },
-    meta: { ...defaultMeta, ...(sheet.meta || {}) },
-    erpOptions: { ...defaultErpOptions, ...(sheet.erpOptions || {}) },
-  });
-
-  const excelColName = (index) => {
-    let name = "";
-    let n = index + 1;
-
-    while (n > 0) {
-      const rem = (n - 1) % 26;
-      name = String.fromCharCode(65 + rem) + name;
-      n = Math.floor((n - 1) / 26);
-    }
-
-    return name;
-  };
-
-  const colName = (index) => {
-    return visibleErpHeaders[index] || erpArabicHeaders[index] || `Column ${index + 1}`;
-  };
-
-  const estimateTextWidth = (text) => {
-    const longestLine = String(text || "")
-      .split(/\r?\n/)
-      .reduce((longest, line) => Math.max(longest, line.length), 0);
-
-    return Math.ceil(longestLine * AVERAGE_CHAR_WIDTH + COLUMN_WIDTH_PADDING);
-  };
-
   const getAutoColumnWidth = (colIndex, rows = []) => {
     const limits = AUTO_COLUMN_LIMITS[colIndex] || { min: 90, max: 220 };
     const headerWidth = estimateTextWidth(colName(colIndex));
@@ -451,105 +376,6 @@ function App() {
     } finally {
       closeContextMenu();
     }
-  };
-
-  const cellAddress = (row, col) => excelColName(col) + (row + 1);
-
-  const parseAddress = (address) => {
-    const match = String(address).toUpperCase().match(/^([A-Z]+)(\d+)$/);
-    if (!match) return null;
-
-    const letters = match[1];
-    const row = Number(match[2]) - 1;
-
-    let col = 0;
-    for (let i = 0; i < letters.length; i++) {
-      col = col * 26 + (letters.charCodeAt(i) - 64);
-    }
-
-    return { row, col: col - 1 };
-  };
-
-  const getCellNumber = (data, row, col) => {
-    const cell = normalizeCell(data?.[row]?.[col]);
-    const number = Number(cell.value);
-    return Number.isFinite(number) ? number : 0;
-  };
-
-  const evaluateFormula = (formula, data) => {
-    const expression = String(formula || "").trim();
-    if (!expression.startsWith("=")) return formula;
-
-    const body = expression.slice(1).toUpperCase();
-
-    const rangeValues = (rangeText) => {
-      const [start, end] = rangeText.split(":");
-      const a = parseAddress(start);
-      const b = parseAddress(end);
-      if (!a || !b) return [];
-
-      const values = [];
-      const rowStart = Math.min(a.row, b.row);
-      const rowEnd = Math.max(a.row, b.row);
-      const colStart = Math.min(a.col, b.col);
-      const colEnd = Math.max(a.col, b.col);
-
-      for (let r = rowStart; r <= rowEnd; r++) {
-        for (let c = colStart; c <= colEnd; c++) {
-          values.push(getCellNumber(data, r, c));
-        }
-      }
-
-      return values;
-    };
-
-    const fnMatch = body.match(/^(SUM|AVERAGE|MIN|MAX|COUNT)\(([^)]+)\)$/);
-
-    if (fnMatch) {
-      const fn = fnMatch[1];
-      const arg = fnMatch[2];
-      const values = arg.includes(":")
-        ? rangeValues(arg)
-        : arg.split(",").map((x) => {
-            const addr = parseAddress(x.trim());
-            return addr ? getCellNumber(data, addr.row, addr.col) : Number(x) || 0;
-          });
-
-      if (fn === "SUM") return String(values.reduce((a, b) => a + b, 0));
-      if (fn === "AVERAGE") {
-        return String(values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0);
-      }
-      if (fn === "MIN") return String(Math.min(...values));
-      if (fn === "MAX") return String(Math.max(...values));
-      if (fn === "COUNT") return String(values.filter((v) => Number.isFinite(v)).length);
-    }
-
-    try {
-      const safeExpression = body.replace(/[A-Z]+\d+/g, (addrText) => {
-        const addr = parseAddress(addrText);
-        return addr ? getCellNumber(data, addr.row, addr.col) : 0;
-      });
-
-      if (!/^[0-9+\-*/().\s]+$/.test(safeExpression)) return "#ERROR";
-      return String(Function("return " + safeExpression)());
-    } catch {
-      return "#ERROR";
-    }
-  };
-
-  const recalculateData = (data) => {
-    return data.map((row) =>
-      row.map((cell) => {
-        const normalized = normalizeCell(cell);
-        if (normalized.formula) {
-          return {
-            ...normalized,
-            value: evaluateFormula(normalized.formula, data),
-          };
-        }
-        return normalized;
-      })
-    );
   };
 
   const showMessage = (text) => {
@@ -3882,85 +3708,24 @@ function App() {
       )}
 
       {descriptionBuilder.open && (
-        <div className="modal-backdrop">
-          <div className="modal-box large-modal description-builder-modal">
-            <h3>Item Description Builder</h3>
-
-            <div className="description-builder-grid">
-              <label>
-                <span>Item Type</span>
-                <select
-                  value={descriptionBuilder.type}
-                  onChange={(event) => updateDescriptionBuilderType(event.target.value)}
-                >
-                  {descriptionTypes.map((type) => (
-                    <option key={type} value={type}>
-                      {descriptionOptions[type].label || type}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                <span>Category</span>
-                <select
-                  value={descriptionBuilder.category}
-                  onChange={(event) => updateDescriptionBuilderCategory(event.target.value)}
-                >
-                  <option value="">Select category</option>
-                  {descriptionCategoryOptions.map((category) => (
-                    <option key={category} value={category}>{category}</option>
-                  ))}
-                </select>
-              </label>
-
-              {descriptionTypeOptions.fields.map((field) => (
-                <label key={field.key}>
-                  <span>{field.label}</span>
-                  <select
-                    value={descriptionBuilder.filters[field.key] || ""}
-                    disabled={!descriptionBuilder.category}
-                    onChange={(event) => updateDescriptionBuilderFilter(field.key, event.target.value)}
-                  >
-                    <option value="">Select {field.label}</option>
-                    {getDescriptionFieldOptions(field.key).map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </label>
-              ))}
-            </div>
-
-            <label>Matching Combination</label>
-            <select
-              value={descriptionBuilder.combination}
-              disabled={!descriptionBuilder.category || !descriptionFilteredRows.length}
-              onChange={(event) =>
-                setDescriptionBuilder((builder) => ({ ...builder, combination: event.target.value }))
-              }
-            >
-              <option value="">Select combination</option>
-              {descriptionFilteredRows.map((row) => (
-                <option key={row.combination} value={row.combination}>
-                  {row.combination}
-                </option>
-              ))}
-            </select>
-
-            <div className="description-builder-preview">
-              {selectedDescriptionRow?.combination || "Select item specs to preview the final description"}
-            </div>
-
-            <div className="modal-actions">
-              <button onClick={applyDescriptionBuilder} disabled={!selectedDescriptionRow}>
-                Use Description
-              </button>
-              <button onClick={() => setDescriptionBuilder((builder) => ({ ...builder, open: false }))}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
+        <ItemDescriptionBuilderModal
+          descriptionBuilder={descriptionBuilder}
+          descriptionTypes={descriptionTypes}
+          descriptionOptions={descriptionOptions}
+          descriptionTypeOptions={descriptionTypeOptions}
+          descriptionCategoryOptions={descriptionCategoryOptions}
+          descriptionFilteredRows={descriptionFilteredRows}
+          selectedDescriptionRow={selectedDescriptionRow}
+          getDescriptionFieldOptions={getDescriptionFieldOptions}
+          onTypeChange={updateDescriptionBuilderType}
+          onCategoryChange={updateDescriptionBuilderCategory}
+          onFilterChange={updateDescriptionBuilderFilter}
+          onCombinationChange={(combination) =>
+            setDescriptionBuilder((builder) => ({ ...builder, combination }))
+          }
+          onApply={applyDescriptionBuilder}
+          onClose={() => setDescriptionBuilder((builder) => ({ ...builder, open: false }))}
+        />
       )}
 
       {deleteConfirmOpen && (

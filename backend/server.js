@@ -4,7 +4,6 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-const zlib = require("zlib");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const bcrypt = require("bcryptjs");
@@ -25,15 +24,41 @@ const {
   getFrontendUrls,
   verifyProductionSecurity,
 } = require("./config/security");
-const defaultErpOptions = require("./config/defaultErpOptions.json");
+const {
+  ALLOWED_SHEET_TYPES,
+  DEFAULT_ROW_PAGE_SIZE,
+  DEFAULT_SHEET_ROWS,
+  FIRST_CONFIRMATION_COLUMN_INDEX,
+  MAX_ROW_PAGE_SIZE,
+  ROW_LOCK_LAST_COLUMN_INDEX,
+  TAX_DETAILED_GROUP_COLUMN_INDEX,
+  TAX_ITEM_CODE_COLUMN_INDEX,
+  TAX_ITEM_NAME_COLUMN_INDEX,
+  TAX_MAIN_GROUP_COLUMN_INDEX,
+  TAX_SUB_GROUP_COLUMN_INDEX,
+  TAX_SUB_SUB_GROUP_COLUMN_INDEX,
+  TAX_SUPPORT_GROUP_COLUMN_INDEX,
+} = require("./config/sheetConstants");
 const { isValidCellIndex, isValidObjectId } = require("./utils/validation");
+const {
+  cellAddress,
+  compareText,
+  createDefaultErpOptions,
+  createDefaultMeta,
+  createTimeLockedColumnError,
+  escapeCsvCell,
+  escapeRegex,
+  isFirstConfirmationEditOpen,
+  parseRequiredDate,
+  sendJson,
+} = require("./utils/sheetHelpers");
 const {
   DEFAULT_SHEET_COLS,
   buildRowSearchText,
-  createCell,
   defaultCellStyle,
   normalizeRowCells,
 } = require("./utils/sheetRows");
+const { createERPTemplateData } = require("./utils/erpTemplates");
 
 const app = express();
 const server = http.createServer(app);
@@ -41,13 +66,6 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const FRONTEND_URLS = getFrontendUrls();
 const corsOptions = createCorsOptions(FRONTEND_URLS);
-
-const escapeCsvCell = (value) => {
-  const text = String(value ?? "");
-  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-};
-
-const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const getCellText = (cells = [], colIndex) => {
   const cell = cells[colIndex] || {};
@@ -61,36 +79,6 @@ const rowNeedsCode = (cells = []) => {
   const itemCode = getCellText(normalizedCells, TAX_ITEM_CODE_COLUMN_INDEX);
 
   return Boolean(firstConfirmation && !itemCode);
-};
-
-const parseRequiredDate = (value) => {
-  const date = new Date(String(value || ""));
-  return Number.isNaN(date.getTime()) ? null : date;
-};
-
-const compareText = (left, right) => String(left || "").localeCompare(String(right || ""), "en", {
-  numeric: true,
-  sensitivity: "base",
-});
-
-const sendJson = (req, res, payload) => {
-  const body = JSON.stringify(payload);
-
-  if (!String(req.headers["accept-encoding"] || "").includes("gzip")) {
-    res.type("application/json").send(body);
-    return;
-  }
-
-  zlib.gzip(body, (error, compressed) => {
-    if (error) {
-      res.type("application/json").send(body);
-      return;
-    }
-
-    res.setHeader("Content-Encoding", "gzip");
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.send(compressed);
-  });
 };
 
 const io = new Server(server, {
@@ -155,251 +143,12 @@ const connectToDatabase = async () => {
   }
 };
 
-const DEFAULT_COLUMN_WIDTHS = {
-  0: 300,
-  1: 300,
-  2: 220,
-  3: 220,
-  4: 145,
-  5: 220,
-  6: 145,
-  7: 82,
-  8: 60,
-  9: 60,
-  10: 150,
-  11: 92,
-  12: 150,
-  13: 92,
-  14: 220,
-};
-
-const DEFAULT_SHEET_ROWS = 5000;
-const DEFAULT_ROW_PAGE_SIZE = 50;
-const MAX_ROW_PAGE_SIZE = 500;
-const ROW_LOCK_LAST_COLUMN_INDEX = 10;
-const FIRST_CONFIRMATION_COLUMN_INDEX = 11;
-const TAX_ITEM_NAME_COLUMN_INDEX = 0;
-const TAX_MAIN_GROUP_COLUMN_INDEX = 2;
-const TAX_SUB_GROUP_COLUMN_INDEX = 3;
-const TAX_SUB_SUB_GROUP_COLUMN_INDEX = 4;
-const TAX_SUPPORT_GROUP_COLUMN_INDEX = 5;
-const TAX_DETAILED_GROUP_COLUMN_INDEX = 6;
-const TAX_ITEM_CODE_COLUMN_INDEX = 12;
-const CAIRO_TIMEZONE = "Africa/Cairo";
-const FIRST_CONFIRMATION_EDIT_START_MINUTE = 8 * 60;
-const FIRST_CONFIRMATION_EDIT_END_MINUTE = (15 * 60) + 30;
-const ALLOWED_SHEET_TYPES = new Set(["custom", "item-master"]);
-
-const cairoTimeMinutes = () => {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: CAIRO_TIMEZONE,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0) % 24;
-  const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
-
-  return (hour * 60) + minute;
-};
-
-const isFirstConfirmationEditOpen = () => {
-  const minutes = cairoTimeMinutes();
-
-  return minutes >= FIRST_CONFIRMATION_EDIT_START_MINUTE && minutes <= FIRST_CONFIRMATION_EDIT_END_MINUTE;
-};
-
-const createTimeLockedColumnError = () => {
-  const error = new Error("First Confirmation can only be edited from 8:00 AM to 3:30 PM Cairo time");
-  error.statusCode = 403;
-  return error;
-};
-
-const createEmptySheetData = (rows = DEFAULT_SHEET_ROWS, cols = DEFAULT_SHEET_COLS) => {
-  return Array.from({ length: rows }, () =>
-    Array.from({ length: cols }, () => createCell(""))
-  );
-};
-
 const rowHasContent = (row = []) => normalizeRowCells(row)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
 const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
-
-const createDefaultMeta = () => ({
-  colWidths: { ...DEFAULT_COLUMN_WIDTHS },
-  rowHeights: {},
-  merges: [],
-  versions: [],
-});
-
-const createDefaultErpOptions = () => JSON.parse(JSON.stringify(defaultErpOptions));
-
-const colName = (index) => {
-  let name = "";
-  let n = index + 1;
-
-  while (n > 0) {
-    const rem = (n - 1) % 26;
-    name = String.fromCharCode(65 + rem) + name;
-    n = Math.floor((n - 1) / 26);
-  }
-
-  return name;
-};
-
-const cellAddress = (rowIndex, colIndex) => {
-  return colName(colIndex) + String(rowIndex + 1);
-};
-
-const visibleItemMasterHeaders = [
-  "اسم الصنف",
-  "الوصف",
-  "المجموعة الرئيسية",
-  "المجموعة الفرعية",
-  "المجموعة تحت الفرعية",
-  "المجموعة المساعدة",
-  "المجموعة التفصيلية",
-  "وحدة القياس",
-  "الصلاحية",
-  "التسلسل",
-  "ملاحظات",
-  "التأكيد الأول",
-  "الكود",
-  "التأكيد الثاني",
-  "Modified Description",
-];
-
-const createERPTemplateData = (type) => {
-  const headersByType = {
-    "item-master": [
-      "اسم الصنف",
-      "الوصف",
-      "المجموعة الرئيسية",
-      "المجموعة الفرعية",
-      "المجموعة تحت الفرعية",
-      "المجموعة المساعدة",
-      "المجموعة التفصيلية",
-      "وحدة القياس",
-      "الصلاحية",
-      "التسلسل",
-      "ملاحظات",
-      "التأكيد الأول",
-      "الكود",
-      "التأكيد الثاني",
-      "التأكيد الثالث",
-    ],
-    inventory: [
-      "Item Code",
-      "Item Name",
-      "Category",
-      "Warehouse",
-      "Opening Qty",
-      "In",
-      "Out",
-      "Balance",
-      "Min Stock",
-      "Status",
-    ],
-    sales: [
-      "Date",
-      "Customer",
-      "Sales Person",
-      "Brand",
-      "Item",
-      "Qty",
-      "Unit Price",
-      "Total",
-      "Status",
-      "Notes",
-    ],
-    finance: [
-      "Date",
-      "Account",
-      "Description",
-      "Debit",
-      "Credit",
-      "Balance",
-      "Cost Center",
-      "Status",
-    ],
-    purchasing: [
-      "PR No.",
-      "Supplier",
-      "Item",
-      "Qty",
-      "Requested By",
-      "Unit Price",
-      "Delivery Date",
-      "Status",
-    ],
-    hr: [
-      "Employee ID",
-      "Name",
-      "Department",
-      "Position",
-      "Join Date",
-      "Salary",
-      "Leave Balance",
-      "Status",
-    ],
-    crm: [
-      "Lead",
-      "Company",
-      "Contact",
-      "Phone",
-      "Email",
-      "Stage",
-      "Next Action",
-      "Owner",
-    ],
-    offers: [
-      "Offer No.",
-      "Customer",
-      "Subject",
-      "Item",
-      "Qty",
-      "Cost",
-      "Selling Price",
-      "Margin",
-      "Approval",
-      "Status",
-    ],
-    warehouse: [
-      "Transaction Date",
-      "Item Code",
-      "Item Name",
-      "Location",
-      "Received",
-      "Issued",
-      "Balance",
-      "Handled By",
-    ],
-  };
-
-  const headers = type === "item-master"
-    ? visibleItemMasterHeaders
-    : headersByType[type] || headersByType["item-master"];
-  const data = createEmptySheetData(1);
-
-  headers.slice(0, DEFAULT_SHEET_COLS).forEach((header, index) => {
-    data[0][index] = {
-      value: header,
-      formula: "",
-      style: {
-        ...defaultCellStyle,
-        fontWeight: "bold",
-        backgroundColor: "#ccfbf1",
-        color: "#075985",
-        textAlign: "center",
-      },
-    };
-  });
-
-  return data;
-};
 
 const signToken = (user) => {
   return jwt.sign(
