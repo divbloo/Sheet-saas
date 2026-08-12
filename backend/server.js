@@ -17,6 +17,7 @@ const SheetRow = require("./models/SheetRow");
 const Workspace = require("./models/Workspace");
 const ChangeLog = require("./models/ChangeLog");
 const authRoutes = require("./routes/authRoutes");
+const itemCodingRoutes = require("./routes/itemCodingRoutes");
 const profileRoutes = require("./routes/profileRoutes");
 const workspaceRoutes = require("./routes/workspaceRoutes");
 const {
@@ -112,6 +113,31 @@ app.use(
     max: 500,
   })
 );
+
+const perfLogThresholdMs = Number(process.env.PERF_LOG_THRESHOLD_MS || 250);
+const perfLogPaths = [
+  /^\/sheet\/[^/]+$/,
+  /^\/sheet\/[^/]+\/rows$/,
+  /^\/sheet\/[^/]+\/search$/,
+  /^\/sheet\/[^/]+\/pending-code-rows$/,
+  /^\/sheet\/[^/]+\/tax-export-rows$/,
+  /^\/item-coding-options$/,
+];
+
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+
+  res.on("finish", () => {
+    if (!perfLogPaths.some((pattern) => pattern.test(req.path))) return;
+
+    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+    if (elapsedMs >= perfLogThresholdMs) {
+      console.log(`[perf] ${req.method} ${req.originalUrl} ${res.statusCode} ${elapsedMs.toFixed(1)}ms`);
+    }
+  });
+
+  next();
+});
 
 const rejectInvalidId = (res, name) => {
   return res.status(400).json({ message: `Invalid ${name}` });
@@ -605,6 +631,7 @@ app.get("/api/health", (req, res) => {
 app.use(authRoutes);
 app.use(profileRoutes);
 app.use(workspaceRoutes);
+app.use(itemCodingRoutes);
 
 /* SHEETS */
 

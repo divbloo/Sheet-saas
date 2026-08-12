@@ -68,6 +68,7 @@ const TAX_ACTIVE_FROM_DAYS_AGO = 5;
 const TAX_EXPORT_FILE_NAME = "NewCodeBulkTemplate (2).xlsx";
 const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
 const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
+const ITEM_CODING_OPTIONS_CACHE_MS = 5 * 60 * 1000;
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -131,6 +132,7 @@ function App() {
     category: "",
     filters: {},
     combination: "",
+    search: "",
   });
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -151,6 +153,8 @@ function App() {
   const rowsLoadingRef = useRef(false);
   const scrollFrameRef = useRef(null);
   const fileInputRef = useRef(null);
+  const codingFileInputRef = useRef(null);
+  const itemDescriptionOptionsLoadedAtRef = useRef(0);
   const contextMenuRef = useRef(null);
   const gridRef = useRef(null);
 
@@ -1513,15 +1517,27 @@ function App() {
   );
 
   const loadItemDescriptionOptions = async () => {
-    if (itemDescriptionOptions) return itemDescriptionOptions;
+    const cacheAge = Date.now() - itemDescriptionOptionsLoadedAtRef.current;
+    if (itemDescriptionOptions && cacheAge < ITEM_CODING_OPTIONS_CACHE_MS) {
+      return itemDescriptionOptions;
+    }
 
     setItemDescriptionOptionsLoading(true);
     try {
-      const module = await import("./itemDescriptionOptions.json");
-      setItemDescriptionOptions(module.default);
-      return module.default;
+      const res = await authFetch(API_URL + "/item-coding-options");
+      const data = await res.json();
+
+      if (!res.ok) {
+        showMessage(data.message || "Failed to load item coding options");
+        return null;
+      }
+
+      const options = data.options || {};
+      setItemDescriptionOptions(options);
+      itemDescriptionOptionsLoadedAtRef.current = Date.now();
+      return options;
     } catch {
-      showMessage("Failed to load item description options");
+      showMessage("Failed to load item coding options");
       return null;
     } finally {
       setItemDescriptionOptionsLoading(false);
@@ -1578,6 +1594,7 @@ function App() {
       category: match?.row?.category || "",
       filters,
       combination: match?.row?.combination || "",
+      search: "",
     });
   };
 
@@ -1588,6 +1605,7 @@ function App() {
       category: "",
       filters: {},
       combination: "",
+      search: "",
     }));
   };
 
@@ -1597,6 +1615,7 @@ function App() {
       category,
       filters: {},
       combination: "",
+      search: "",
     }));
   };
 
@@ -1605,6 +1624,7 @@ function App() {
       ...builder,
       filters: { ...builder.filters, [fieldKey]: value },
       combination: "",
+      search: "",
     }));
   };
 
@@ -2117,6 +2137,55 @@ function App() {
     event.target.value = "";
   };
 
+  const uploadItemCodingExcel = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file || !canManageSheetUsers || !selectedSheet) return;
+
+    setSavingStatus("Updating coding...");
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const XLSX = await loadExcelTools();
+      const workbook = XLSX.read(buffer);
+      const sheets = workbook.SheetNames.map((name) => ({
+        name,
+        rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], {
+          header: 1,
+          defval: "",
+          raw: false,
+        }),
+      }));
+
+      const res = await authFetch(API_URL + "/item-coding-options", {
+        method: "PUT",
+        body: JSON.stringify({ sheetId: selectedSheet._id, sheets }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        showMessage(data.message || "Failed to update item coding options");
+        return;
+      }
+
+      setItemDescriptionOptions(data.options || {});
+      itemDescriptionOptionsLoadedAtRef.current = Date.now();
+      const updatedRows = Object.values(data.summary || {}).reduce(
+        (total, item) => total + (Number(item.rows) || 0),
+        0
+      );
+      showMessage(
+        updatedRows
+          ? `Item coding options updated (${updatedRows} rows)`
+          : "Item coding options updated"
+      );
+    } catch {
+      showMessage("Failed to read item coding file");
+    } finally {
+      setSavingStatus("");
+      event.target.value = "";
+    }
+  };
+
   const saveSheet = async (silent = false) => {
     flushPendingCellSave();
 
@@ -2326,6 +2395,10 @@ function App() {
     () => Object.entries(descriptionBuilder.filters),
     [descriptionBuilder.filters]
   );
+  const descriptionSearchQuery = useMemo(
+    () => String(descriptionBuilder.search || "").trim().toLowerCase(),
+    [descriptionBuilder.search]
+  );
   const descriptionCategoryOptions = useMemo(
     () => (descriptionBuilder.open ? uniqueDescriptionValues(descriptionRows, "category") : []),
     [descriptionBuilder.open, descriptionRows]
@@ -2335,10 +2408,24 @@ function App() {
 
     return descriptionRows.filter((row) => {
       if (descriptionBuilder.category && row.category !== descriptionBuilder.category) return false;
+      if (
+        descriptionSearchQuery &&
+        !Object.values(row).some((value) =>
+          String(value || "").toLowerCase().includes(descriptionSearchQuery)
+        )
+      ) {
+        return false;
+      }
 
       return descriptionFilterEntries.every(([key, value]) => !value || row[key] === value);
     });
-  }, [descriptionBuilder.open, descriptionBuilder.category, descriptionRows, descriptionFilterEntries]);
+  }, [
+    descriptionBuilder.open,
+    descriptionBuilder.category,
+    descriptionRows,
+    descriptionSearchQuery,
+    descriptionFilterEntries,
+  ]);
   const selectedDescriptionRow =
     descriptionFilteredRows.find((row) => row.combination === descriptionBuilder.combination) ||
     (descriptionFilteredRows.length === 1 ? descriptionFilteredRows[0] : null);
@@ -3121,12 +3208,24 @@ function App() {
             <div className="drawer-section">
               <h4>File & History</h4>
               <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={uploadExcel} hidden />
+              <input
+                ref={codingFileInputRef}
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={uploadItemCodingExcel}
+                hidden
+              />
               <button
                 disabled={!canBypassRowLocks}
                 onClick={() => fileInputRef.current.click()}
               >
                 Upload Excel
               </button>
+              {canManageSheetUsers && (
+                <button onClick={() => codingFileInputRef.current.click()}>
+                  Import Coding
+                </button>
+              )}
               <button onClick={exportCSV}>Export CSV</button>
               <div className="export-range-controls">
                 <label>
@@ -3634,6 +3733,9 @@ function App() {
           onTypeChange={updateDescriptionBuilderType}
           onCategoryChange={updateDescriptionBuilderCategory}
           onFilterChange={updateDescriptionBuilderFilter}
+          onSearchChange={(search) =>
+            setDescriptionBuilder((builder) => ({ ...builder, search, combination: "" }))
+          }
           onCombinationChange={(combination) =>
             setDescriptionBuilder((builder) => ({ ...builder, combination }))
           }

@@ -10,6 +10,7 @@ export default function ItemDescriptionBuilderModal({
   onTypeChange,
   onCategoryChange,
   onFilterChange,
+  onSearchChange,
   onCombinationChange,
   onApply,
   onClose,
@@ -63,6 +64,16 @@ export default function ItemDescriptionBuilderModal({
             </label>
           ))}
         </div>
+
+        <label className="description-builder-search">
+          <span>Search</span>
+          <input
+            type="search"
+            value={descriptionBuilder.search || ""}
+            placeholder="Search item name or specs"
+            onChange={(event) => onSearchChange(event.target.value)}
+          />
+        </label>
 
         <label>Final Item Name</label>
         <select

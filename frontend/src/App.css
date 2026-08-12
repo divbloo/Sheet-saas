@@ -1475,6 +1475,17 @@ select:focus {
   margin-bottom: 6px;
 }
 
+.description-builder-search {
+  margin-top: 12px;
+}
+
+.description-builder-search span {
+  display: block;
+  margin-bottom: 6px;
+  color: #0f766e;
+  font-weight: 700;
+}
+
 .description-builder-preview {
   margin-top: 14px;
   padding: 12px;
