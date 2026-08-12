@@ -204,6 +204,8 @@ function App() {
   };
 
   const isFirstConfirmationColumn = (colIndex) => colIndex === FIRST_CONFIRMATION_COLUMN_INDEX;
+  const isRowLoaded = (rowIndex) => Array.isArray(selectedSheet?.data?.[rowIndex]);
+  const getSheetCell = (rowIndex, colIndex) => normalizeCell(selectedSheet?.data?.[rowIndex]?.[colIndex]);
   const isFirstConfirmationEditOpen = () => {
     const minutes = cairoTimeMinutes();
 
@@ -219,6 +221,7 @@ function App() {
   };
   const canEditCell = (rowIndex, colIndex) => (
     canEdit &&
+    isRowLoaded(rowIndex) &&
     (!isFirstConfirmationColumn(colIndex) || isFirstConfirmationEditOpen()) &&
     (
       colIndex > ROW_LOCK_LAST_COLUMN_INDEX ||
@@ -226,6 +229,8 @@ function App() {
     )
   );
   const getRowLockMessage = (rowIndex) => {
+    if (!isRowLoaded(rowIndex)) return "Loading row...";
+
     const rowOwner = selectedSheet?.rowOwners?.[rowIndex];
     return rowOwner
       ? `Row ${rowIndex + 1} is locked by ${rowOwner.username || rowOwner.email || "another user"}`
@@ -295,6 +300,8 @@ function App() {
       style: { ...defaultCellStyle },
     };
   };
+
+  const createEmptyRow = () => Array.from({ length: COLS }, () => normalizeCell(""));
 
   const normalizeData = (data = [], minRows = MIN_SHEET_ROWS) => {
     return Array.from({ length: Math.max(minRows, data.length) }, (_, r) => {
@@ -788,37 +795,10 @@ function App() {
     setMenuOpen(false);
   };
 
-  const loadRowsBeforeStart = async (sheetId, start) => {
-    if (!start) return [];
-
-    const loadedRows = [];
-    let nextStart = 0;
-
-    while (nextStart < start) {
-      const limit = Math.min(EXPORT_ROW_BATCH_SIZE, start - nextStart);
-      const res = await authFetch(
-        API_URL + "/sheet/" + sheetId + "/rows?start=" + nextStart + "&limit=" + limit
-      );
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.message || "Failed to load previous rows");
-      }
-
-      const responseStart = Number.isInteger(data.start) ? data.start : nextStart;
-      const normalizedRows = normalizeData(data.rows || [], limit);
-      loadedRows.splice(responseStart, normalizedRows.length, ...normalizedRows);
-      nextStart = responseStart + normalizedRows.length;
-    }
-
-    return loadedRows;
-  };
-
-  const buildInitialSheetRows = async (sheetId, rows, start) => {
+  const buildInitialSheetRows = async (_sheetId, rows, start) => {
     if (!start) return rows;
 
-    const leadingRows = await loadRowsBeforeStart(sheetId, start);
-    return mergeRowsAtStart(leadingRows, rows, start);
+    return mergeRowsAtStart([], rows, start);
   };
 
   const openSheet = async (id) => {
@@ -856,12 +836,14 @@ function App() {
     setCurrentPage("sheet");
     setMenuOpen(false);
 
-    await Promise.all([
-      loadErpOptions(id),
-      loadPendingCodeRows(id),
-    ]);
     setVisitedPendingCodeRows([]);
     setPendingCodeCursor(null);
+    setServerPendingCodeRows([]);
+
+    void Promise.all([
+      loadErpOptions(id),
+      loadPendingCodeRows(id),
+    ]).catch(() => {});
 
     window.requestAnimationFrame(() => {
       if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
@@ -1633,7 +1615,7 @@ function App() {
 
       const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
       const expectedRowCount = Math.min(ROW_LOAD_STEP, sheetRowTotal - responseStart);
-      const normalizedRows = normalizeData(data.rows || [], expectedRowCount);
+      const normalizedRows = normalizeData(data.rows || [], expectedRowCount).slice(0, expectedRowCount);
 
       setSelectedSheet((prev) => {
         if (!prev || prev._id !== selectedSheet._id) return prev;
@@ -1676,55 +1658,82 @@ function App() {
     }
   };
 
-  const ensureRowsLoaded = async (targetCount) => {
-    if (!selectedSheet || targetCount <= selectedSheet.data.length) return;
+  const ensureRowsLoaded = async (targetCount, options = {}) => {
+    if (!selectedSheet) return;
+
+    const loadedRowMap = selectedSheet.data || [];
+    const targetEnd = Math.min(Math.max(targetCount, 0), sheetRowTotal);
+    const targetStart = Math.max(0, Number(options.start ?? Math.max(0, targetEnd - ROW_LOAD_STEP)));
+    if (targetEnd <= targetStart) return;
+
+    const missingRanges = [];
+    let rangeStart = null;
+
+    for (let rowIndex = targetStart; rowIndex < targetEnd; rowIndex += 1) {
+      if (loadedRowMap[rowIndex]) {
+        if (rangeStart !== null) {
+          missingRanges.push({ start: rangeStart, end: rowIndex });
+          rangeStart = null;
+        }
+      } else if (rangeStart === null) {
+        rangeStart = rowIndex;
+      }
+    }
+
+    if (rangeStart !== null) missingRanges.push({ start: rangeStart, end: targetEnd });
+    if (!missingRanges.length) return;
 
     setRowsLoading(true);
 
-    let loadedRows = selectedSheet.data.length;
-    const neededRows = Math.min(targetCount, sheetRowTotal);
     const loadedChunks = [];
     const loadedRowOwners = {};
 
-    while (loadedRows < neededRows) {
-      const limit = Math.min(ROW_LOAD_STEP, neededRows - loadedRows);
-      const res = await authFetch(
-        API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + limit
-      );
-      const data = await res.json();
+    try {
+      for (const range of missingRanges) {
+        let loadedRows = range.start;
 
-      if (!res.ok) {
-        showMessage(data.message || "Failed to load rows");
-        break;
+        while (loadedRows < range.end) {
+          const limit = Math.min(ROW_LOAD_STEP, range.end - loadedRows);
+          const res = await authFetch(
+            API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + limit
+          );
+          const data = await res.json();
+
+          if (!res.ok) {
+            showMessage(data.message || "Failed to load rows");
+            return;
+          }
+
+          const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
+          const expectedRowCount = Math.min(limit, sheetRowTotal - responseStart);
+          const normalizedRows = normalizeData(data.rows || [], expectedRowCount).slice(0, expectedRowCount);
+
+          loadedChunks.push({ start: responseStart, rows: normalizedRows });
+          Object.assign(loadedRowOwners, data.rowOwners || {});
+          loadedRows = responseStart + normalizedRows.length;
+          setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
+        }
       }
 
-      const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
-      const normalizedRows = normalizeData(data.rows || [], limit);
+      if (loadedChunks.length > 0) {
+        setSelectedSheet((prev) => {
+          if (!prev || prev._id !== selectedSheet._id) return prev;
 
-      loadedChunks.push({ start: responseStart, rows: normalizedRows });
-      Object.assign(loadedRowOwners, data.rowOwners || {});
-      loadedRows = responseStart + normalizedRows.length;
-      setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
+          const nextData = loadedChunks.reduce(
+            (rows, chunk) => mergeRowsAtStart(rows, chunk.rows, chunk.start),
+            prev.data
+          );
+
+          return {
+            ...prev,
+            data: nextData,
+            rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
+          };
+        });
+      }
+    } finally {
+      setRowsLoading(false);
     }
-
-    if (loadedChunks.length > 0) {
-      setSelectedSheet((prev) => {
-        if (!prev || prev._id !== selectedSheet._id) return prev;
-
-        const nextData = loadedChunks.reduce(
-          (rows, chunk) => mergeRowsAtStart(rows, chunk.rows, chunk.start),
-          prev.data
-        );
-
-        return {
-          ...prev,
-          data: nextData,
-          rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
-        };
-      });
-    }
-
-    setRowsLoading(false);
   };
 
   const parseExportRowNumber = (value, fallback) => {
@@ -2011,7 +2020,7 @@ function App() {
       ? unvisitedPendingCodeRows[0]
       : pendingCodeRows[currentPendingIndex >= 0 ? (currentPendingIndex + 1) % pendingCodeRows.length : 0];
 
-    await ensureRowsLoaded(rowIndex + 1);
+    await ensureRowsLoaded(rowIndex + 1, { start: rowIndex });
     setVisibleRows((count) => Math.max(count, rowIndex + 1));
     setSelectedCell({ rowIndex, colIndex: TAX_ITEM_CODE_COLUMN_INDEX });
     setSelectedRange({
@@ -2046,7 +2055,7 @@ function App() {
     const match = matches[nextIndex];
 
     setCellSearchIndex(nextIndex);
-    await ensureRowsLoaded(match.rowIndex + 1);
+    await ensureRowsLoaded(match.rowIndex + 1, { start: match.rowIndex });
     setSelectedCell(match);
     setSelectedRange({
       start: { row: match.rowIndex, col: match.colIndex },
@@ -2057,7 +2066,7 @@ function App() {
 
   const copySelection = async () => {
     if (!selectedCell || !selectedSheet) return;
-    const cell = normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]);
+    const cell = getSheetCell(selectedCell.rowIndex, selectedCell.colIndex);
     const text = cell.formula || cell.value || "";
 
     try {
@@ -2084,10 +2093,11 @@ function App() {
     if (!selectedCell || !selectedSheet || !canEdit) return;
 
     const { rowIndex, colIndex } = selectedCell;
-    const source = normalizeCell(selectedSheet.data[rowIndex][colIndex]);
+    const source = getSheetCell(rowIndex, colIndex);
     const patches = [];
 
     for (let r = rowIndex + 1; r < Math.min(rowIndex + 6, selectedSheet.data.length); r++) {
+      if (!isRowLoaded(r)) continue;
       patches.push({
         rowIndex: r,
         colIndex,
@@ -2617,9 +2627,23 @@ function App() {
     Math.floor(gridScrollTop / DEFAULT_ROW_HEIGHT) - VIRTUAL_ROW_BUFFER
   );
   const virtualRowEnd = Math.min(visibleRows, virtualRowStart + VIRTUAL_ROW_WINDOW);
-  const renderedRows = selectedSheet?.data?.slice(virtualRowStart, virtualRowEnd) || [];
+  const renderedRows = Array.from(
+    { length: Math.max(0, virtualRowEnd - virtualRowStart) },
+    (_, offset) => selectedSheet?.data?.[virtualRowStart + offset] || createEmptyRow()
+  );
   const topSpacerHeight = virtualRowStart * DEFAULT_ROW_HEIGHT;
   const bottomSpacerHeight = Math.max(0, visibleRows - virtualRowEnd) * DEFAULT_ROW_HEIGHT;
+
+  useEffect(() => {
+    if (!selectedSheet?._id || virtualRowEnd <= virtualRowStart) return undefined;
+
+    const timer = window.setTimeout(() => {
+      void ensureRowsLoaded(virtualRowEnd, { start: virtualRowStart });
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSheet?._id, virtualRowStart, virtualRowEnd]);
 
   useEffect(() => {
     if (!token) return;
@@ -2632,11 +2656,7 @@ function App() {
 
       try {
         await Promise.all([
-          loadMe(),
-          loadWorkspaces(),
           loadSheets(),
-          loadAnalytics(),
-          activeSheetId ? loadErpOptions(activeSheetId) : Promise.resolve(),
           activeSheetId ? loadPendingCodeRows(activeSheetId) : Promise.resolve(),
         ]);
         setSavingStatus((current) => current === "Unsaved changes..." ? current : "Refreshed");
@@ -3559,8 +3579,8 @@ function App() {
               title={selectedCell && !selectedCellCanEdit ? getCellLockMessage(selectedCell.rowIndex, selectedCell.colIndex) : ""}
               value={
                 selectedCell
-                  ? normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]).formula ||
-                    normalizeCell(selectedSheet.data[selectedCell.rowIndex][selectedCell.colIndex]).value
+                  ? getSheetCell(selectedCell.rowIndex, selectedCell.colIndex).formula ||
+                    getSheetCell(selectedCell.rowIndex, selectedCell.colIndex).value
                   : ""
               }
               onChange={(e) => {
@@ -3578,7 +3598,7 @@ function App() {
             <table className="sheet-table-full">
               <colgroup>
                 <col className="corner-col" />
-                {selectedSheet.data[0]?.map((_, colIndex) => (
+                {Array.from({ length: COLS }, (_, colIndex) => (
                   <col key={colIndex} style={{ width: getColumnWidth(colIndex) }} />
                 ))}
               </colgroup>
@@ -3586,7 +3606,7 @@ function App() {
               <thead>
                 <tr>
                   <th className="corner-cell"></th>
-                  {selectedSheet.data[0]?.map((_, colIndex) => (
+                  {Array.from({ length: COLS }, (_, colIndex) => (
                     <th
                       key={colIndex}
                       style={{

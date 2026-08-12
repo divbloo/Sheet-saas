@@ -819,6 +819,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
   const updatedCells = [];
   const updatedRows = [];
   const changeLogs = [];
+  let formulaCountDelta = 0;
 
   for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
     const editsProtectedColumns = rowPatches.some(
@@ -830,10 +831,14 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
     rowPatches.forEach((patch) => {
       const currentCell = row.cells[patch.colIndex] || createCell("");
+      const previousHasFormula = Boolean(currentCell && typeof currentCell === "object" && currentCell.formula);
+      const nextHasFormula = Boolean(patch.formula);
       const oldValue = currentCell && typeof currentCell === "object"
         ? currentCell.formula || currentCell.value || ""
         : currentCell;
       const newValue = patch.formula || patch.value || "";
+
+      formulaCountDelta += Number(nextHasFormula) - Number(previousHasFormula);
 
       if (String(oldValue ?? "") !== String(newValue ?? "")) {
         changeLogs.push({
@@ -898,6 +903,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     updatedCells,
     rowOwners: getRowOwnershipMap(updatedRows),
     pendingCodeUpdates,
+    formulaCountDelta,
   };
 };
 
@@ -916,12 +922,15 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
     throw createTimeLockedColumnError();
   }
 
-  const { rowOwners, pendingCodeUpdates } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
+  const { rowOwners, pendingCodeUpdates, formulaCountDelta } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
+  const currentFormulaCells = Number.isFinite(Number(sheet.analytics?.totalFormulaCells))
+    ? Number(sheet.analytics.totalFormulaCells)
+    : await countFormulaCellsInRows(sheet._id);
 
   sheet.analytics = {
     ...(sheet.analytics || {}),
     totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-    totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+    totalFormulaCells: Math.max(0, currentFormulaCells + formulaCountDelta),
     totalMergedCells: sheet.meta?.merges?.length || 0,
     lastEditedBy: user.email,
     lastEditedAt: new Date(),
@@ -1487,12 +1496,20 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    const rows = await SheetRow.find({ sheetId: sheet._id })
+    const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
+    const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
+    const candidateRows = await SheetRow.find({
+      sheetId: sheet._id,
+      $or: [
+        { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
+        { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
+      ],
+    })
       .sort({ rowIndex: 1 })
       .select("rowIndex cells")
       .lean();
 
-    const rowIndexes = rows
+    const rowIndexes = candidateRows
       .filter((row) => rowNeedsCode(row.cells))
       .map((row) => row.rowIndex);
 
