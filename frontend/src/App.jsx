@@ -1610,7 +1610,7 @@ function App() {
 
   const applyDescriptionBuilder = () => {
     if (!selectedDescriptionRow || descriptionBuilder.rowIndex === null) {
-      showMessage("Select a matching item description first");
+      showMessage("Select a matching item name first");
       return;
     }
 

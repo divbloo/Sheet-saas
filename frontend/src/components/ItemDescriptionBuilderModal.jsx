@@ -17,11 +17,11 @@ export default function ItemDescriptionBuilderModal({
   return (
     <div className="modal-backdrop">
       <div className="modal-box large-modal description-builder-modal">
-        <h3>Item Description Builder</h3>
+        <h3>New Item Coding</h3>
 
         <div className="description-builder-grid">
           <label>
-            <span>Item Type</span>
+            <span>Coding Type</span>
             <select
               value={descriptionBuilder.type}
               onChange={(event) => onTypeChange(event.target.value)}
@@ -35,12 +35,12 @@ export default function ItemDescriptionBuilderModal({
           </label>
 
           <label>
-            <span>Category</span>
+            <span>Item</span>
             <select
               value={descriptionBuilder.category}
               onChange={(event) => onCategoryChange(event.target.value)}
             >
-              <option value="">Select category</option>
+              <option value="">Select item</option>
               {descriptionCategoryOptions.map((category) => (
                 <option key={category} value={category}>{category}</option>
               ))}
@@ -64,13 +64,13 @@ export default function ItemDescriptionBuilderModal({
           ))}
         </div>
 
-        <label>Matching Combination</label>
+        <label>Final Item Name</label>
         <select
           value={descriptionBuilder.combination}
           disabled={!descriptionBuilder.category || !descriptionFilteredRows.length}
           onChange={(event) => onCombinationChange(event.target.value)}
         >
-          <option value="">Select combination</option>
+          <option value="">Select final item name</option>
           {descriptionFilteredRows.map((row) => (
             <option key={row.combination} value={row.combination}>
               {row.combination}
@@ -79,12 +79,12 @@ export default function ItemDescriptionBuilderModal({
         </select>
 
         <div className="description-builder-preview">
-          {selectedDescriptionRow?.combination || "Select item specs to preview the final description"}
+          {selectedDescriptionRow?.combination || "Select item specs to preview the final item name"}
         </div>
 
         <div className="modal-actions">
           <button onClick={onApply} disabled={!selectedDescriptionRow}>
-            Use Description
+            Use Item Name
           </button>
           <button onClick={onClose}>
             Cancel
