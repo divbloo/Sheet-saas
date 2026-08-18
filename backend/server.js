@@ -57,6 +57,8 @@ const {
 const {
   DEFAULT_SHEET_COLS,
   buildRowSearchText,
+  buildRowSearchTokens,
+  buildSearchQueryTokens,
   defaultCellStyle,
   normalizeRowCells,
 } = require("./utils/sheetRows");
@@ -183,12 +185,96 @@ const connectToDatabase = async () => {
   }
 };
 
+const isTransactionUnsupportedError = (error) => {
+  const message = String(error?.message || "");
+
+  return (
+    error?.code === 20 ||
+    error?.codeName === "IllegalOperation" ||
+    message.includes("Transaction numbers are only allowed") ||
+    message.includes("transactions are not supported")
+  );
+};
+
+const runWithOptionalTransaction = async (operation) => {
+  const session = await mongoose.startSession();
+
+  try {
+    let result;
+
+    await session.withTransaction(async () => {
+      result = await operation(session);
+    });
+
+    return result;
+  } catch (error) {
+    if (!isTransactionUnsupportedError(error)) {
+      throw error;
+    }
+
+    return operation(null);
+  } finally {
+    await session.endSession();
+  }
+};
+
 const rowHasContent = (row = []) => normalizeRowCells(row)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
 const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
+
+const buildRowSearchFields = (cells = []) => ({
+  searchText: buildRowSearchText(cells),
+  searchTokens: buildRowSearchTokens(cells),
+});
+
+const updateSheetAnalytics = async (sheet, userEmail, options = {}) => {
+  const lastEditedAt = options.lastEditedAt || new Date();
+  const totalMergedCells = options.totalMergedCells ?? sheet.meta?.merges?.length ?? 0;
+  const queryOptions = options.session ? { session: options.session } : undefined;
+
+  if (Number.isFinite(options.totalFormulaCells)) {
+    await Sheet.updateOne(
+      { _id: sheet._id },
+      {
+        $inc: { "analytics.totalEdits": 1 },
+        $set: {
+          "analytics.totalFormulaCells": Math.max(0, options.totalFormulaCells),
+          "analytics.totalMergedCells": totalMergedCells,
+          "analytics.lastEditedBy": userEmail,
+          "analytics.lastEditedAt": lastEditedAt,
+        },
+      },
+      queryOptions
+    );
+    return;
+  }
+
+  const formulaCountDelta = Number(options.formulaCountDelta || 0);
+
+  await Sheet.updateOne(
+    { _id: sheet._id },
+    [
+      {
+        $set: {
+          "analytics.totalEdits": { $add: [{ $ifNull: ["$analytics.totalEdits", 0] }, 1] },
+          "analytics.totalFormulaCells": {
+            $max: [
+              0,
+              { $add: [{ $ifNull: ["$analytics.totalFormulaCells", 0] }, formulaCountDelta] },
+            ],
+          },
+          "analytics.totalMergedCells": totalMergedCells,
+          "analytics.lastEditedBy": userEmail,
+          "analytics.lastEditedAt": lastEditedAt,
+        },
+      },
+    ],
+    queryOptions
+  );
+};
 
 const findSheetForUser = async (sheetId, userId) => {
   const sheet = await Sheet.findById(sheetId);
@@ -227,13 +313,16 @@ const hydrateCollaboratorUsernames = async (sheet) => {
   return changed;
 };
 
-const countFormulaCellsInRows = async (sheetId) => {
-  const [result] = await SheetRow.aggregate([
+const countFormulaCellsInRows = async (sheetId, session = null) => {
+  const aggregate = SheetRow.aggregate([
     { $match: { sheetId: new mongoose.Types.ObjectId(sheetId) } },
     { $unwind: "$cells" },
     { $match: { "cells.formula": { $nin: [null, ""] } } },
     { $count: "count" },
   ]);
+  if (session) aggregate.session(session);
+
+  const [result] = await aggregate;
 
   return result?.count || 0;
 };
@@ -266,7 +355,7 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
           sheetId: sheet._id,
           rowIndex,
           cells: normalizeRowCells(row),
-          searchText: buildRowSearchText(row),
+          ...buildRowSearchFields(row),
           ownerId: hasContent ? sheet.createdBy : null,
           ownerEmail: hasContent ? owner?.email || "" : "",
           ownerUsername: hasContent ? owner?.username || owner?.email || "" : "",
@@ -286,17 +375,30 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
 };
 
 const ensureSheetRowsSearchText = async (sheetId) => {
-  const missingCount = await SheetRow.countDocuments({
+  const missingSearchFieldsFilter = {
     sheetId,
-    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
+    $or: [
+      { searchText: { $exists: false } },
+      {
+        $and: [
+          { searchText: { $nin: [null, ""] } },
+          {
+            $or: [
+              { searchTokens: { $exists: false } },
+              { searchTokens: { $size: 0 } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const missingCount = await SheetRow.countDocuments({
+    ...missingSearchFieldsFilter,
   });
 
   if (missingCount === 0) return;
 
-  const cursor = SheetRow.find({
-    sheetId,
-    $or: [{ searchText: { $exists: false } }, { searchText: "" }],
-  })
+  const cursor = SheetRow.find(missingSearchFieldsFilter)
     .select("cells")
     .cursor();
   const operations = [];
@@ -305,7 +407,7 @@ const ensureSheetRowsSearchText = async (sheetId) => {
     operations.push({
       updateOne: {
         filter: { _id: row._id },
-        update: { $set: { searchText: buildRowSearchText(row.cells) } },
+        update: { $set: buildRowSearchFields(row.cells) },
       },
     });
 
@@ -318,6 +420,24 @@ const ensureSheetRowsSearchText = async (sheetId) => {
   if (operations.length > 0) {
     await SheetRow.bulkWrite(operations);
   }
+};
+
+const searchBackfillsInFlight = new Set();
+
+const scheduleSheetRowsSearchBackfill = (sheetId) => {
+  const key = sheetId.toString();
+  if (searchBackfillsInFlight.has(key)) return;
+
+  searchBackfillsInFlight.add(key);
+  setImmediate(async () => {
+    try {
+      await ensureSheetRowsSearchText(sheetId);
+    } catch (error) {
+      console.error("Failed to backfill sheet row search tokens", error);
+    } finally {
+      searchBackfillsInFlight.delete(key);
+    }
+  });
 };
 
 const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE) => {
@@ -392,6 +512,7 @@ const ensureSheetRow = async (sheetId, rowIndex) => {
         rowIndex,
         cells: normalizeRowCells([]),
         searchText: "",
+        searchTokens: [],
       },
     },
     { returnDocument: "after", upsert: true }
@@ -478,18 +599,118 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     patchesByRow.set(rowIndex, rowPatches);
   });
 
-  const updatedCells = [];
+  const rowIndexes = Array.from(patchesByRow.keys());
+  const isPrivileged = canBypassRowLocks(role);
+  const existingRows = await SheetRow.find({
+    sheetId: sheet._id,
+    rowIndex: { $in: rowIndexes },
+  });
+  const existingRowsByIndex = new Map(existingRows.map((row) => [row.rowIndex, row]));
+  const protectedRowIndexes = rowIndexes.filter((rowIndex) => (
+    patchesByRow.get(rowIndex).some((patch) => patch.colIndex <= ROW_LOCK_LAST_COLUMN_INDEX)
+  ));
+
+  for (const rowIndex of protectedRowIndexes) {
+    const row = existingRowsByIndex.get(rowIndex);
+    const isOwner = row?.ownerId?.toString() === user.id.toString();
+
+    if (row?.ownerId && !isOwner && !isPrivileged) {
+      throw createRowLockedError(row);
+    }
+  }
+
+  const missingRowIndexes = rowIndexes.filter((rowIndex) => !existingRowsByIndex.has(rowIndex));
+
+  if (missingRowIndexes.length > 0) {
+    try {
+      await SheetRow.bulkWrite(
+        missingRowIndexes.map((rowIndex) => ({
+          updateOne: {
+            filter: { sheetId: sheet._id, rowIndex },
+            update: {
+              $setOnInsert: {
+                sheetId: sheet._id,
+                rowIndex,
+                cells: normalizeRowCells([]),
+                searchText: "",
+                searchTokens: [],
+              },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false }
+      );
+    } catch (error) {
+      if (error?.code !== 11000 && error?.name !== "MongoBulkWriteError") {
+        throw error;
+      }
+    }
+  }
+
+  const rows = await SheetRow.find({
+    sheetId: sheet._id,
+    rowIndex: { $in: rowIndexes },
+  });
+  const rowsByIndex = new Map(rows.map((row) => {
+    row.cells = normalizeRowCells(row.cells);
+    return [row.rowIndex, row];
+  }));
+  const unownedProtectedRowIndexes = protectedRowIndexes.filter((rowIndex) => !rowsByIndex.get(rowIndex)?.ownerId);
+
+  if (unownedProtectedRowIndexes.length > 0) {
+    await SheetRow.bulkWrite(
+      unownedProtectedRowIndexes.map((rowIndex) => ({
+        updateOne: {
+          filter: {
+            sheetId: sheet._id,
+            rowIndex,
+            $or: [{ ownerId: null }, { ownerId: { $exists: false } }],
+          },
+          update: {
+            $set: {
+              ownerId: user.id,
+              ownerEmail: user.email,
+              ownerUsername: user.username || user.email,
+            },
+          },
+        },
+      }))
+    );
+
+    const claimedRows = await SheetRow.find({
+      sheetId: sheet._id,
+      rowIndex: { $in: unownedProtectedRowIndexes },
+    });
+
+    claimedRows.forEach((row) => {
+      row.cells = normalizeRowCells(row.cells);
+      rowsByIndex.set(row.rowIndex, row);
+    });
+  }
+
+  for (const rowIndex of protectedRowIndexes) {
+    const row = rowsByIndex.get(rowIndex);
+    const isOwner = row?.ownerId?.toString() === user.id.toString();
+
+    if (row?.ownerId && !isOwner && !isPrivileged) {
+      throw createRowLockedError(row);
+    }
+  }
+
   const updatedRows = [];
   const changeLogs = [];
+  const rowOperations = [];
   let formulaCountDelta = 0;
 
   for (const [rowIndex, rowPatches] of patchesByRow.entries()) {
     const editsProtectedColumns = rowPatches.some(
       (patch) => patch.colIndex <= ROW_LOCK_LAST_COLUMN_INDEX
     );
-    const row = editsProtectedColumns
-      ? await ensureRowEditAccess(sheet, user, role, rowIndex)
-      : await ensureSheetRow(sheet._id, rowIndex);
+    const row = rowsByIndex.get(rowIndex);
+    if (!row) {
+      throw new Error(`Failed to load row ${rowIndex + 1}`);
+    }
 
     rowPatches.forEach((patch) => {
       const currentCell = row.cells[patch.colIndex] || createCell("");
@@ -527,15 +748,11 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
           ...(patch.style || {}),
         },
       };
-
-      updatedCells.push({
-        rowIndex,
-        colIndex: patch.colIndex,
-        cell: row.cells[patch.colIndex],
-      });
     });
 
-    row.searchText = buildRowSearchText(row.cells);
+    const searchFields = buildRowSearchFields(row.cells);
+    row.searchText = searchFields.searchText;
+    row.searchTokens = searchFields.searchTokens;
 
     if (editsProtectedColumns && !rowHasProtectedContent(row.cells)) {
       row.ownerId = null;
@@ -543,13 +760,26 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
       row.ownerUsername = "";
     }
 
-    row.markModified("cells");
-    row.markModified("searchText");
-    row.markModified("ownerId");
-    row.markModified("ownerEmail");
-    row.markModified("ownerUsername");
-    await row.save();
+    rowOperations.push({
+      updateOne: {
+        filter: { _id: row._id },
+        update: {
+          $set: {
+            cells: row.cells,
+            searchText: row.searchText,
+            searchTokens: row.searchTokens,
+            ownerId: row.ownerId || null,
+            ownerEmail: row.ownerEmail || "",
+            ownerUsername: row.ownerUsername || "",
+          },
+        },
+      },
+    });
     updatedRows.push(row);
+  }
+
+  if (rowOperations.length > 0) {
+    await SheetRow.bulkWrite(rowOperations);
   }
 
   if (changeLogs.length > 0) {
@@ -562,7 +792,6 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
   }));
 
   return {
-    updatedCells,
     rowOwners: getRowOwnershipMap(updatedRows),
     pendingCodeUpdates,
     formulaCountDelta,
@@ -585,18 +814,8 @@ const applyCellPatchesForUser = async ({ sheet, user, rowIndex, colIndex, value,
   }
 
   const { rowOwners, pendingCodeUpdates, formulaCountDelta } = await applyCellPatchesToRows(sheet, user, role, normalizedPatches);
-  const currentFormulaCells = await getFormulaCellCount(sheet);
 
-  sheet.analytics = {
-    ...(sheet.analytics || {}),
-    totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-    totalFormulaCells: Math.max(0, currentFormulaCells + formulaCountDelta),
-    totalMergedCells: sheet.meta?.merges?.length || 0,
-    lastEditedBy: user.email,
-    lastEditedAt: new Date(),
-  };
-
-  await sheet.save();
+  await updateSheetAnalytics(sheet, user.email, { formulaCountDelta });
 
   return { patches: normalizedPatches, rowOwners, pendingCodeUpdates };
 };
@@ -701,7 +920,7 @@ app.post("/sheet", auth, async (req, res) => {
         sheetId: sheet._id,
         rowIndex,
         cells: normalizeRowCells(row),
-        searchText: buildRowSearchText(row),
+        ...buildRowSearchFields(row),
         ownerId: req.user.id,
         ownerEmail: req.user.email,
         ownerUsername: req.user.username || req.user.email,
@@ -852,12 +1071,14 @@ app.get("/sheet/:id/search", auth, async (req, res) => {
     }
 
     await migrateSheetRowsIfNeeded(sheet);
-    await ensureSheetRowsSearchText(sheet._id);
+    scheduleSheetRowsSearchBackfill(sheet._id);
 
-    const rowDocs = await SheetRow.find({
-      sheetId: sheet._id,
-      searchText: { $regex: escapeRegex(query), $options: "i" },
-    })
+    const queryTokens = query.length >= 2 ? buildSearchQueryTokens(query).slice(0, 20) : [];
+    const rowFilter = queryTokens.length > 0
+      ? { sheetId: sheet._id, searchTokens: { $all: queryTokens } }
+      : { sheetId: sheet._id, searchText: { $regex: escapeRegex(query), $options: "i" } };
+
+    const rowDocs = await SheetRow.find(rowFilter)
       .sort({ rowIndex: 1 })
       .limit(limit)
       .select("rowIndex cells")
@@ -1052,16 +1273,10 @@ app.put("/sheet/:id", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    sheet.analytics = {
-      ...(sheet.analytics || {}),
-      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
-      totalMergedCells: sheet.meta?.merges?.length || 0,
-      lastEditedBy: req.user.email,
-      lastEditedAt: new Date(),
-    };
-
     await sheet.save();
+    await updateSheetAnalytics(sheet, req.user.email, {
+      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
+    });
 
     await ChangeLog.create({
       sheetId: sheet._id,
@@ -1076,7 +1291,8 @@ app.put("/sheet/:id", auth, async (req, res) => {
       changeType: "import",
     });
 
-    const sheetObject = sheet.toObject();
+    const updatedSheet = await Sheet.findById(sheet._id);
+    const sheetObject = updatedSheet.toObject();
     sheetObject.data = [];
 
     io.to(req.params.id).emit("sheet-saved", sheetObject);
@@ -1097,49 +1313,55 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
 
     const start = Math.max(0, Number.parseInt(req.body.start, 10) || 0);
     const rows = Array.isArray(req.body.rows) ? req.body.rows.slice(0, MAX_ROW_PAGE_SIZE) : [];
+    const rowOperations = rows.map((row, offset) => {
+      const hasContent = rowHasProtectedContent(row);
 
-    if (req.body.reset === true) {
-      await SheetRow.deleteMany({ sheetId: sheet._id });
-    }
-
-    if (rows.length > 0) {
-      await SheetRow.bulkWrite(
-        rows.map((row, offset) => {
-          const hasContent = rowHasProtectedContent(row);
-
-          return {
-            updateOne: {
-              filter: { sheetId: sheet._id, rowIndex: start + offset },
-              update: {
-                $set: {
-                  sheetId: sheet._id,
-                  rowIndex: start + offset,
-                  cells: normalizeRowCells(row),
-                  searchText: buildRowSearchText(row),
-                  ownerId: hasContent ? req.user.id : null,
-                  ownerEmail: hasContent ? req.user.email : "",
-                  ownerUsername: hasContent ? req.user.username || req.user.email : "",
-                },
-              },
-              upsert: true,
+      return {
+        updateOne: {
+          filter: { sheetId: sheet._id, rowIndex: start + offset },
+          update: {
+            $set: {
+              sheetId: sheet._id,
+              rowIndex: start + offset,
+              cells: normalizeRowCells(row),
+              ...buildRowSearchFields(row),
+              ownerId: hasContent ? req.user.id : null,
+              ownerEmail: hasContent ? req.user.email : "",
+              ownerUsername: hasContent ? req.user.username || req.user.email : "",
             },
-          };
-        })
-      );
-    }
+          },
+          upsert: true,
+        },
+      };
+    });
 
-    sheet.data = [];
-    sheet.markModified("data");
-    sheet.analytics = {
-      ...(sheet.analytics || {}),
-      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: await countFormulaCellsInRows(sheet._id),
-      totalMergedCells: sheet.meta?.merges?.length || 0,
-      lastEditedBy: req.user.email,
-      lastEditedAt: new Date(),
-    };
+    await runWithOptionalTransaction(async (session) => {
+      const queryOptions = session ? { session } : undefined;
 
-    await sheet.save();
+      if (rowOperations.length > 0) {
+        await SheetRow.bulkWrite(rowOperations, queryOptions);
+      }
+
+      if (req.body.reset === true) {
+        const deleteFilter = rows.length > 0
+          ? {
+              sheetId: sheet._id,
+              $or: [
+                { rowIndex: { $lt: start } },
+                { rowIndex: { $gte: start + rows.length } },
+              ],
+            }
+          : { sheetId: sheet._id };
+
+        await SheetRow.deleteMany(deleteFilter, queryOptions);
+      }
+
+      await Sheet.updateOne({ _id: sheet._id }, { $set: { data: [] } }, queryOptions);
+      await updateSheetAnalytics(sheet, req.user.email, {
+        totalFormulaCells: await countFormulaCellsInRows(sheet._id, session),
+        session,
+      });
+    });
 
     res.json({
       ok: true,
@@ -1249,16 +1471,7 @@ app.patch("/sheet/:id/cell-style", auth, async (req, res) => {
       changeType: "style",
     });
 
-    sheet.analytics = {
-      ...(sheet.analytics || {}),
-      totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-      totalFormulaCells: await getFormulaCellCount(sheet),
-      totalMergedCells: sheet.meta?.merges?.length || 0,
-      lastEditedBy: req.user.email,
-      lastEditedAt: new Date(),
-    };
-
-    await sheet.save();
+    await updateSheetAnalytics(sheet, req.user.email);
 
     io.to(req.params.id).emit("cell-style-change", {
       rowIndex,
@@ -1601,6 +1814,10 @@ io.on("connection", (socket) => {
       onlineUsersBySheet.get(sheetId).delete(socket.id);
       await broadcastPresence(sheetId);
     }
+
+    if (socket.currentSheetId === sheetId) {
+      socket.currentSheetId = null;
+    }
   });
 
   socket.on("cell-change", async ({ sheetId, rowIndex, colIndex, value, formula, patches }, ack) => {
@@ -1718,16 +1935,7 @@ io.on("connection", (socket) => {
         changeType: "style",
       });
 
-      sheet.analytics = {
-        ...(sheet.analytics || {}),
-        totalEdits: ((sheet.analytics && sheet.analytics.totalEdits) || 0) + 1,
-        totalFormulaCells: await getFormulaCellCount(sheet),
-        totalMergedCells: sheet.meta?.merges?.length || 0,
-        lastEditedBy: socket.user.email,
-        lastEditedAt: new Date(),
-      };
-
-      await sheet.save();
+      await updateSheetAnalytics(sheet, socket.user.email);
 
       socket.to(sheetId).emit("cell-style-change", {
         rowIndex,
@@ -1750,11 +1958,21 @@ io.on("connection", (socket) => {
       return;
     }
 
+    if (socket.currentSheetId !== sheetId || !socket.rooms.has(sheetId)) {
+      socket.emit("socket-error", "Access denied");
+      return;
+    }
+
+    if (!isValidCellIndex(Number(rowIndex)) || !isValidCellIndex(Number(colIndex))) {
+      socket.emit("socket-error", "Invalid cell position");
+      return;
+    }
+
     socket.to(sheetId).emit("cursor-change", {
       userId: socket.user.id,
       email: socket.user.email,
-      rowIndex,
-      colIndex,
+      rowIndex: Number(rowIndex),
+      colIndex: Number(colIndex),
     });
   });
 

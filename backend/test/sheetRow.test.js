@@ -17,8 +17,20 @@ test("SheetRow has a searchable text index shape", () => {
   assert.ok(searchIndex);
 });
 
+test("SheetRow has a searchable token index shape", () => {
+  const indexes = SheetRow.schema.indexes();
+  const searchIndex = indexes.find(([fields]) => (
+    fields.sheetId === 1 &&
+    fields.searchTokens === 1 &&
+    fields.rowIndex === 1
+  ));
+
+  assert.ok(searchIndex);
+});
+
 test("SheetRow stores the user who first claimed the row", () => {
   assert.ok(SheetRow.schema.path("ownerId"));
   assert.ok(SheetRow.schema.path("ownerEmail"));
   assert.ok(SheetRow.schema.path("ownerUsername"));
+  assert.ok(SheetRow.schema.path("searchTokens"));
 });

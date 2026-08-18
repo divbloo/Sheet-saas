@@ -15,6 +15,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
+    "backfill:search": "node scripts/backfillSheetRowSearchTokens.js",
     "migrate:rows": "node scripts/migrateSheetRows.js",
     "test": "node --test",
     "start": "node server.js"

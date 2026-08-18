@@ -3,7 +3,11 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const Sheet = require("../models/Sheet");
 const SheetRow = require("../models/SheetRow");
-const { buildRowSearchText, normalizeRowCells } = require("../utils/sheetRows");
+const {
+  buildRowSearchText,
+  buildRowSearchTokens,
+  normalizeRowCells,
+} = require("../utils/sheetRows");
 
 const migrate = async () => {
   if (!process.env.MONGO_URI) {
@@ -26,6 +30,7 @@ const migrate = async () => {
           rowIndex,
           cells: normalizeRowCells(row),
           searchText: buildRowSearchText(row),
+          searchTokens: buildRowSearchTokens(row),
         })),
         { ordered: false }
       );

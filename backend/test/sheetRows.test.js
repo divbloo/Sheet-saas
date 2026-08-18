@@ -1,6 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { DEFAULT_SHEET_COLS, buildRowSearchText, normalizeRowCells } = require("../utils/sheetRows");
+const {
+  DEFAULT_SHEET_COLS,
+  buildRowSearchText,
+  buildRowSearchTokens,
+  buildSearchQueryTokens,
+  normalizeRowCells,
+} = require("../utils/sheetRows");
 
 test("normalizeRowCells pads rows to the configured sheet width", () => {
   const row = normalizeRowCells([{ value: "A" }]);
@@ -33,4 +39,19 @@ test("buildRowSearchText returns empty text for empty rows", () => {
   const text = buildRowSearchText([]);
 
   assert.equal(text, "");
+});
+
+test("buildRowSearchTokens supports partial indexed search", () => {
+  const tokens = buildRowSearchTokens([{ value: "Invoice Total" }]);
+
+  assert.ok(tokens.includes("invoice"));
+  assert.ok(tokens.includes("nvo"));
+  assert.ok(tokens.includes("to"));
+});
+
+test("buildSearchQueryTokens matches row search token shape", () => {
+  const rowTokens = buildRowSearchTokens([{ value: "Invoice Total" }]);
+  const queryTokens = buildSearchQueryTokens("voi");
+
+  assert.ok(queryTokens.every((token) => rowTokens.includes(token)));
 });

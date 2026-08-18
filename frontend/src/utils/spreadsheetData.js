@@ -85,6 +85,8 @@ export const colName = (index) => {
 
 export const cellAddress = (row, col) => excelColName(col) + (row + 1);
 
+const MAX_FORMULA_RANGE_CELLS = 10000;
+
 const parseAddress = (address) => {
   const match = String(address).toUpperCase().match(/^([A-Z]+)(\d+)$/);
   if (!match) return null;
@@ -100,10 +102,37 @@ const parseAddress = (address) => {
   return { row, col: col - 1 };
 };
 
+const isValidFormulaAddress = (address, data) => {
+  return (
+    address &&
+    address.row >= 0 &&
+    address.col >= 0 &&
+    address.col < COLS &&
+    address.row < Math.max(1, data?.length || 0)
+  );
+};
+
 const getCellNumber = (data, row, col) => {
   const cell = normalizeCell(data?.[row]?.[col]);
   const number = Number(cell.value);
   return Number.isFinite(number) ? number : 0;
+};
+
+const createNumberSummary = () => ({
+  count: 0,
+  sum: 0,
+  min: null,
+  max: null,
+});
+
+const addNumberToSummary = (summary, value) => {
+  const number = Number(value);
+  const safeNumber = Number.isFinite(number) ? number : 0;
+
+  summary.count += 1;
+  summary.sum += safeNumber;
+  summary.min = summary.min === null ? safeNumber : Math.min(summary.min, safeNumber);
+  summary.max = summary.max === null ? safeNumber : Math.max(summary.max, safeNumber);
 };
 
 export const evaluateFormula = (formula, data) => {
@@ -112,25 +141,37 @@ export const evaluateFormula = (formula, data) => {
 
   const body = expression.slice(1).toUpperCase();
 
-  const rangeValues = (rangeText) => {
+  const summarizeRange = (rangeText) => {
     const [start, end] = rangeText.split(":");
     const a = parseAddress(start);
     const b = parseAddress(end);
-    if (!a || !b) return [];
+    if (!a || !b) return null;
 
-    const values = [];
     const rowStart = Math.min(a.row, b.row);
-    const rowEnd = Math.max(a.row, b.row);
+    const rowEnd = Math.min(Math.max(a.row, b.row), Math.max(0, (data?.length || 1) - 1));
     const colStart = Math.min(a.col, b.col);
-    const colEnd = Math.max(a.col, b.col);
+    const colEnd = Math.min(Math.max(a.col, b.col), COLS - 1);
+    const cellCount = (rowEnd - rowStart + 1) * (colEnd - colStart + 1);
+
+    if (
+      rowStart < 0 ||
+      colStart < 0 ||
+      rowStart > rowEnd ||
+      colStart > colEnd ||
+      cellCount > MAX_FORMULA_RANGE_CELLS
+    ) {
+      return null;
+    }
+
+    const summary = createNumberSummary();
 
     for (let row = rowStart; row <= rowEnd; row += 1) {
       for (let col = colStart; col <= colEnd; col += 1) {
-        values.push(getCellNumber(data, row, col));
+        addNumberToSummary(summary, getCellNumber(data, row, col));
       }
     }
 
-    return values;
+    return summary;
   };
 
   const fnMatch = body.match(/^(SUM|AVERAGE|MIN|MAX|COUNT)\(([^)]+)\)$/);
@@ -138,26 +179,30 @@ export const evaluateFormula = (formula, data) => {
   if (fnMatch) {
     const fn = fnMatch[1];
     const arg = fnMatch[2];
-    const values = arg.includes(":")
-      ? rangeValues(arg)
-      : arg.split(",").map((value) => {
+    const summary = arg.includes(":")
+      ? summarizeRange(arg)
+      : arg.split(",").reduce((result, value) => {
           const addr = parseAddress(value.trim());
-          return addr ? getCellNumber(data, addr.row, addr.col) : Number(value) || 0;
-        });
+          const nextValue = isValidFormulaAddress(addr, data)
+            ? getCellNumber(data, addr.row, addr.col)
+            : Number(value) || 0;
 
-    if (fn === "SUM") return String(values.reduce((a, b) => a + b, 0));
-    if (fn === "AVERAGE") {
-      return String(values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0);
-    }
-    if (fn === "MIN") return String(Math.min(...values));
-    if (fn === "MAX") return String(Math.max(...values));
-    if (fn === "COUNT") return String(values.filter((value) => Number.isFinite(value)).length);
+          addNumberToSummary(result, nextValue);
+          return result;
+        }, createNumberSummary());
+
+    if (!summary) return "#ERROR";
+    if (fn === "SUM") return String(summary.sum);
+    if (fn === "AVERAGE") return String(summary.count ? summary.sum / summary.count : 0);
+    if (fn === "MIN") return String(summary.min ?? 0);
+    if (fn === "MAX") return String(summary.max ?? 0);
+    if (fn === "COUNT") return String(summary.count);
   }
 
   try {
     const safeExpression = body.replace(/[A-Z]+\d+/g, (addrText) => {
       const addr = parseAddress(addrText);
-      return addr ? getCellNumber(data, addr.row, addr.col) : 0;
+      return isValidFormulaAddress(addr, data) ? getCellNumber(data, addr.row, addr.col) : 0;
     });
 
     if (!/^[0-9+\-*/().\s]+$/.test(safeExpression)) return "#ERROR";
