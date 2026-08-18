@@ -157,6 +157,7 @@ function App() {
   const localCellDraftsRef = useRef(new Map());
   const rowsLoadingRef = useRef(false);
   const rowIndexesLoadingRef = useRef(new Map());
+  const rowIndexesLoadedRef = useRef(new Map());
   const rowLoadCounterRef = useRef(0);
   const virtualRowLoadInFlightRef = useRef(false);
   const pendingVirtualRangeRef = useRef(null);
@@ -621,6 +622,7 @@ function App() {
     flushPendingCellSave();
     pendingVirtualRangeRef.current = null;
     rowIndexesLoadingRef.current.clear();
+    rowIndexesLoadedRef.current.clear();
 
     if (socketRef.current && selectedSheet?._id) {
       socketRef.current.emit("leave-sheet", selectedSheet._id);
@@ -1499,6 +1501,11 @@ function App() {
       requestedRows = new Set();
       rowIndexesLoadingRef.current.set(sheetId, requestedRows);
     }
+    let confirmedRows = rowIndexesLoadedRef.current.get(sheetId);
+    if (!confirmedRows) {
+      confirmedRows = new Set();
+      rowIndexesLoadedRef.current.set(sheetId, confirmedRows);
+    }
     const requestedEnd = Math.min(Math.max(targetCount, 0), sheetRowTotal);
     const requestedStart = Math.max(0, Number(options.start ?? Math.max(0, requestedEnd - ROW_LOAD_STEP)));
     const targetStart = Math.floor(requestedStart / ROW_LOAD_STEP) * ROW_LOAD_STEP;
@@ -1512,7 +1519,7 @@ function App() {
     let rangeStart = null;
 
     for (let rowIndex = targetStart; rowIndex < targetEnd; rowIndex += 1) {
-      if (loadedRowMap[rowIndex] || requestedRows.has(rowIndex)) {
+      if (loadedRowMap[rowIndex] || confirmedRows.has(rowIndex) || requestedRows.has(rowIndex)) {
         if (rangeStart !== null) {
           missingRanges.push({ start: rangeStart, end: rowIndex });
           rangeStart = null;
@@ -1565,6 +1572,9 @@ function App() {
           const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
           const expectedRowCount = Math.min(limit, sheetRowTotal - responseStart);
           const normalizedRows = normalizeData(data.rows || [], expectedRowCount).slice(0, expectedRowCount);
+          for (let offset = 0; offset < normalizedRows.length; offset += 1) {
+            confirmedRows.add(responseStart + offset);
+          }
 
           loadedChunks.push({ start: responseStart, rows: normalizedRows });
           Object.assign(loadedRowOwners, data.rowOwners || {});
