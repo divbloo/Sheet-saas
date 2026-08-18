@@ -64,9 +64,11 @@ const {
   buildRowSearchTokens,
   buildSearchQueryTokens,
   compactRowCells,
+  compactStoredRowCells,
   defaultCellStyle,
   normalizeRowCells,
   rowHasStoredData,
+  rowNeedsCode,
 } = require("./utils/sheetRows");
 const { createERPTemplateData } = require("./utils/erpTemplates");
 const { auth } = require("./utils/userHelpers");
@@ -96,14 +98,6 @@ const getCellText = (cells = [], colIndex) => {
   const cell = cells[colIndex] || {};
   if (cell && typeof cell === "object") return String(cell.formula || cell.value || "").trim();
   return String(cell || "").trim();
-};
-
-const rowNeedsCode = (cells = []) => {
-  const normalizedCells = normalizeRowCells(cells);
-  const firstConfirmation = getCellText(normalizedCells, FIRST_CONFIRMATION_COLUMN_INDEX);
-  const itemCode = getCellText(normalizedCells, TAX_ITEM_CODE_COLUMN_INDEX);
-
-  return Boolean(firstConfirmation && !itemCode);
 };
 
 const io = new Server(server, {
@@ -257,6 +251,7 @@ const buildRowSearchFields = (cells = []) => {
     searchText,
     searchTokens: buildRowSearchTokens(cells),
     hasContent: Boolean(searchText),
+    needsCode: rowNeedsCode(cells),
   };
 };
 
@@ -398,7 +393,7 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
         return {
           sheetId: sheet._id,
           rowIndex,
-          cells: normalizeRowCells(row),
+          cells: compactStoredRowCells(row),
           ...buildRowSearchFields(row),
           ownerId: hasContent ? legacySheet.createdBy : null,
           ownerEmail: hasContent ? owner?.email || "" : "",
@@ -577,10 +572,11 @@ const ensureSheetRow = async (sheetId, rowIndex) => {
       $setOnInsert: {
         sheetId,
         rowIndex,
-        cells: normalizeRowCells([]),
+        cells: [],
         searchText: "",
         searchTokens: [],
         hasContent: false,
+        needsCode: false,
       },
     },
     { returnDocument: "after", upsert: true }
@@ -699,10 +695,11 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
               $setOnInsert: {
                 sheetId: sheet._id,
                 rowIndex,
-                cells: normalizeRowCells([]),
+                cells: [],
                 searchText: "",
                 searchTokens: [],
                 hasContent: false,
+                needsCode: false,
               },
             },
             upsert: true,
@@ -823,6 +820,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     row.searchText = searchFields.searchText;
     row.searchTokens = searchFields.searchTokens;
     row.hasContent = searchFields.hasContent;
+    row.needsCode = searchFields.needsCode;
 
     if (editsProtectedColumns && !rowHasProtectedContent(row.cells)) {
       row.ownerId = null;
@@ -835,10 +833,11 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
         filter: { _id: row._id },
         update: {
           $set: {
-            cells: row.cells,
+            cells: compactStoredRowCells(row.cells),
             searchText: row.searchText,
             searchTokens: row.searchTokens,
             hasContent: row.hasContent,
+            needsCode: row.needsCode,
             ownerId: row.ownerId || null,
             ownerEmail: row.ownerEmail || "",
             ownerUsername: row.ownerUsername || "",
@@ -1000,7 +999,7 @@ app.post("/sheet", auth, async (req, res) => {
       .map((row, rowIndex) => ({
         sheetId: sheet._id,
         rowIndex,
-        cells: normalizeRowCells(row),
+        cells: compactStoredRowCells(row),
         ...buildRowSearchFields(row),
         ownerId: req.user.id,
         ownerEmail: req.user.email,
@@ -1234,22 +1233,15 @@ app.get("/sheet/:id/pending-code-rows", auth, async (req, res) => {
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    const firstConfirmationValuePath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.value`;
-    const firstConfirmationFormulaPath = `cells.${FIRST_CONFIRMATION_COLUMN_INDEX}.formula`;
     const candidateRows = await SheetRow.find({
       sheetId: sheet._id,
-      $or: [
-        { [firstConfirmationValuePath]: { $exists: true, $nin: ["", null] } },
-        { [firstConfirmationFormulaPath]: { $exists: true, $nin: ["", null] } },
-      ],
+      needsCode: true,
     })
       .sort({ rowIndex: 1 })
-      .select("rowIndex cells")
+      .select("rowIndex")
       .lean();
 
-    const rowIndexes = candidateRows
-      .filter((row) => rowNeedsCode(row.cells))
-      .map((row) => row.rowIndex);
+    const rowIndexes = candidateRows.map((row) => row.rowIndex);
 
     sendJson(req, res, { rowIndexes });
   } catch (error) {
@@ -1452,7 +1444,7 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
             $set: {
               sheetId: sheet._id,
               rowIndex: start + offset,
-              cells: normalizeRowCells(row),
+              cells: compactStoredRowCells(row),
               ...buildRowSearchFields(row),
               ownerId: hasContent ? req.user.id : null,
               ownerEmail: hasContent ? req.user.email : "",
@@ -1903,7 +1895,7 @@ app.post("/sheet/:id/versions/:versionId/restore", auth, async (req, res) => {
               $set: {
                 sheetId: sheet._id,
                 rowIndex: Number(row.rowIndex),
-                cells: normalizeRowCells(row.cells),
+                cells: compactStoredRowCells(row.cells),
                 ...buildRowSearchFields(row.cells),
                 ownerId: row.ownerId || (hasProtectedContent ? sheet.createdBy : null),
                 ownerEmail: row.ownerEmail || "",

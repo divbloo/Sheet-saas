@@ -5,7 +5,9 @@ const SheetRow = require("../models/SheetRow");
 const {
   buildRowSearchText,
   buildRowSearchTokens,
+  compactStoredRowCells,
   rowHasStoredData,
+  rowNeedsCode,
 } = require("../utils/sheetRows");
 
 const BATCH_SIZE = 500;
@@ -16,6 +18,7 @@ const optimize = async () => {
   }
 
   await mongoose.connect(process.env.MONGO_URI);
+  await SheetRow.createIndexes();
 
   const cursor = SheetRow.find({}).select("cells updatedAt").lean().cursor();
   const operations = [];
@@ -41,9 +44,11 @@ const optimize = async () => {
           filter: { _id: row._id, updatedAt: row.updatedAt },
           update: {
             $set: {
+              cells: compactStoredRowCells(row.cells),
               searchText,
               searchTokens: buildRowSearchTokens(row.cells),
               hasContent: Boolean(searchText),
+              needsCode: rowNeedsCode(row.cells),
             },
           },
         },

@@ -1499,8 +1499,13 @@ function App() {
       requestedRows = new Set();
       rowIndexesLoadingRef.current.set(sheetId, requestedRows);
     }
-    const targetEnd = Math.min(Math.max(targetCount, 0), sheetRowTotal);
-    const targetStart = Math.max(0, Number(options.start ?? Math.max(0, targetEnd - ROW_LOAD_STEP)));
+    const requestedEnd = Math.min(Math.max(targetCount, 0), sheetRowTotal);
+    const requestedStart = Math.max(0, Number(options.start ?? Math.max(0, requestedEnd - ROW_LOAD_STEP)));
+    const targetStart = Math.floor(requestedStart / ROW_LOAD_STEP) * ROW_LOAD_STEP;
+    const targetEnd = Math.min(
+      Math.ceil(requestedEnd / ROW_LOAD_STEP) * ROW_LOAD_STEP,
+      sheetRowTotal
+    );
     if (targetEnd <= targetStart) return;
 
     const missingRanges = [];

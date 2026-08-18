@@ -34,6 +34,16 @@ test("SheetRow stores the user who first claimed the row", () => {
   assert.ok(SheetRow.schema.path("ownerUsername"));
   assert.ok(SheetRow.schema.path("searchTokens"));
   assert.ok(SheetRow.schema.path("hasContent"));
+  assert.ok(SheetRow.schema.path("needsCode"));
+});
+
+test("SheetRow has a fast pending-code index", () => {
+  const indexes = SheetRow.schema.indexes();
+  const pendingCodeIndex = indexes.find(([fields]) => (
+    fields.sheetId === 1 && fields.needsCode === 1 && fields.rowIndex === 1
+  ));
+
+  assert.ok(pendingCodeIndex);
 });
 
 test("SheetRow has a fast last-content-row index", () => {

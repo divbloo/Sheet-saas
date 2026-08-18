@@ -6,8 +6,10 @@ const {
   buildRowSearchTokens,
   buildSearchQueryTokens,
   compactRowCells,
+  compactStoredRowCells,
   normalizeRowCells,
   rowHasStoredData,
+  rowNeedsCode,
 } = require("../utils/sheetRows");
 
 test("normalizeRowCells pads rows to the configured sheet width", () => {
@@ -38,6 +40,18 @@ test("compactRowCells removes default styles and trailing empty cells", () => {
   );
 });
 
+test("compactStoredRowCells strips default styles before database writes", () => {
+  assert.deepEqual(compactStoredRowCells([]), []);
+  assert.deepEqual(
+    compactStoredRowCells([{ value: "Item" }]),
+    [{ value: "Item", formula: "", style: {} }]
+  );
+  assert.deepEqual(
+    compactStoredRowCells([{ value: "Item", style: { color: "#ff0000" } }]),
+    [{ value: "Item", formula: "", style: { color: "#ff0000" } }]
+  );
+});
+
 test("buildRowSearchText includes cell values and formulas", () => {
   const text = buildRowSearchText([{ value: "Item A" }, { formula: "=SUM(A1:A2)" }]);
 
@@ -56,6 +70,16 @@ test("rowHasStoredData ignores default empty cells but keeps custom styles", () 
   assert.equal(rowHasStoredData([]), false);
   assert.equal(rowHasStoredData([{ value: "Item" }]), true);
   assert.equal(rowHasStoredData([{ style: { backgroundColor: "#ff0000" } }]), true);
+});
+
+test("rowNeedsCode only flags confirmed rows without an item code", () => {
+  const pending = [];
+  pending[11] = { value: "confirmed" };
+  assert.equal(rowNeedsCode(pending), true);
+
+  pending[12] = { value: "ITEM-1" };
+  assert.equal(rowNeedsCode(pending), false);
+  assert.equal(rowNeedsCode([]), false);
 });
 
 test("buildRowSearchTokens supports partial indexed search", () => {

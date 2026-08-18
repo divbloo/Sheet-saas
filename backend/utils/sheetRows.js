@@ -1,5 +1,9 @@
 const DEFAULT_SHEET_COLS = 15;
 const LEGACY_PACKAGE_COLUMN_INDEX = 8;
+const {
+  FIRST_CONFIRMATION_COLUMN_INDEX,
+  TAX_ITEM_CODE_COLUMN_INDEX,
+} = require("../config/sheetConstants");
 
 const defaultCellStyle = {
   fontWeight: "normal",
@@ -64,6 +68,24 @@ const compactRowCells = (cells = []) => {
   return compactCells;
 };
 
+const compactStoredRowCells = (cells = []) => {
+  const storedCells = normalizeRowCells(cells).map((cell) => ({
+    value: cell.value ?? "",
+    formula: cell.formula || "",
+    style: Object.fromEntries(
+      Object.entries(cell.style || {}).filter(([key, value]) => value !== defaultCellStyle[key])
+    ),
+  }));
+
+  while (storedCells.length > 0) {
+    const cell = storedCells[storedCells.length - 1];
+    if (cell.value !== "" || cell.formula || Object.keys(cell.style).length > 0) break;
+    storedCells.pop();
+  }
+
+  return storedCells;
+};
+
 const buildRowSearchText = (cells = []) => {
   return normalizeRowCells(cells)
     .map((cell) => `${cell.value ?? ""} ${cell.formula || ""}`)
@@ -80,6 +102,20 @@ const rowHasStoredData = (cells = []) => normalizeRowCells(cells).some((cell) =>
     value !== undefined && value !== null && value !== "" && value !== defaultCellStyle[key]
   ));
 });
+
+const getCellText = (cells = [], colIndex) => {
+  const cell = cells[colIndex] || {};
+  if (cell && typeof cell === "object") return String(cell.formula || cell.value || "").trim();
+  return String(cell || "").trim();
+};
+
+const rowNeedsCode = (cells = []) => {
+  const normalizedCells = normalizeRowCells(cells);
+  const firstConfirmation = getCellText(normalizedCells, FIRST_CONFIRMATION_COLUMN_INDEX);
+  const itemCode = getCellText(normalizedCells, TAX_ITEM_CODE_COLUMN_INDEX);
+
+  return Boolean(firstConfirmation && !itemCode);
+};
 
 const normalizeSearchText = (input = "") => {
   if (Array.isArray(input)) return buildRowSearchText(input);
@@ -138,8 +174,10 @@ module.exports = {
   createCell,
   normalizeRowCells,
   compactRowCells,
+  compactStoredRowCells,
   buildRowSearchText,
   buildRowSearchTokens,
   buildSearchQueryTokens,
   rowHasStoredData,
+  rowNeedsCode,
 };

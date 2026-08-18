@@ -6,8 +6,9 @@ const SheetRow = require("../models/SheetRow");
 const {
   buildRowSearchText,
   buildRowSearchTokens,
-  normalizeRowCells,
+  compactStoredRowCells,
   rowHasStoredData,
+  rowNeedsCode,
 } = require("../utils/sheetRows");
 
 const migrate = async () => {
@@ -36,10 +37,11 @@ const migrate = async () => {
           return {
             sheetId: sheet._id,
             rowIndex,
-            cells: normalizeRowCells(row),
+            cells: compactStoredRowCells(row),
             searchText,
             searchTokens: buildRowSearchTokens(row),
             hasContent: Boolean(searchText),
+            needsCode: rowNeedsCode(row),
           };
         }),
         { ordered: false }

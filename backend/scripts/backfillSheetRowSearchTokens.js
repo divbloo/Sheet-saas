@@ -2,7 +2,7 @@ require("dotenv").config();
 
 const mongoose = require("mongoose");
 const SheetRow = require("../models/SheetRow");
-const { buildRowSearchText, buildRowSearchTokens } = require("../utils/sheetRows");
+const { buildRowSearchText, buildRowSearchTokens, rowNeedsCode } = require("../utils/sheetRows");
 
 const migrate = async () => {
   if (!process.env.MONGO_URI) {
@@ -28,6 +28,7 @@ const migrate = async () => {
             searchText,
             searchTokens: buildRowSearchTokens(row.cells),
             hasContent: Boolean(searchText),
+            needsCode: rowNeedsCode(row.cells),
           },
         },
       },
