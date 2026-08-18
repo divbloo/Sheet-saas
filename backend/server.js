@@ -297,7 +297,10 @@ const updateSheetAnalytics = async (sheet, userEmail, options = {}) => {
         },
       },
     ],
-    queryOptions
+    {
+      ...(queryOptions || {}),
+      updatePipeline: true,
+    }
   );
 };
 
