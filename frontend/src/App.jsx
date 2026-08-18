@@ -670,6 +670,11 @@ function App() {
 
     window.setTimeout(() => {
       if (selectedSheetRef.current?._id === id) {
+        void loadSheetVersions(id).catch(() => {});
+      }
+    }, 500);
+    window.setTimeout(() => {
+      if (selectedSheetRef.current?._id === id) {
         void loadPendingCodeRows(id).catch(() => {});
       }
     }, 1500);
@@ -1446,6 +1451,24 @@ function App() {
     }
   };
 
+  const loadSheetVersions = async (sheetId) => {
+    if (!sheetId) return;
+
+    const res = await authFetch(API_URL + "/sheet/" + sheetId + "/versions");
+    const data = await res.json();
+    if (!res.ok || !Array.isArray(data)) return;
+
+    setSelectedSheet((prev) => {
+      if (!prev || prev._id !== sheetId) return prev;
+      const nextSheet = {
+        ...prev,
+        meta: { ...prev.meta, versions: data },
+      };
+      selectedSheetRef.current = nextSheet;
+      return nextSheet;
+    });
+  };
+
   const handleGridScroll = (event) => {
     const grid = event.currentTarget;
     const nextScrollTop = grid.scrollTop;
@@ -1975,38 +1998,59 @@ function App() {
     });
   };
 
-  const saveVersion = () => {
+  const saveVersion = async () => {
     if (!selectedSheet) return;
 
-    const version = {
-      createdAt: new Date().toISOString(),
-      data: selectedSheet.data,
-      meta: selectedSheet.meta,
-    };
+    const sheetId = selectedSheet._id;
+    setSavingStatus("Saving version...");
+    const res = await authFetch(API_URL + "/sheet/" + sheetId + "/versions", {
+      method: "POST",
+    });
+    const data = await res.json();
 
-    setSelectedSheet((prev) => ({
-      ...prev,
-      meta: {
-        ...prev.meta,
-        versions: [version, ...(prev.meta?.versions || [])].slice(0, 10),
-      },
-    }));
+    if (!res.ok) {
+      setSavingStatus("");
+      showMessage(data.message || "Failed to save version");
+      return;
+    }
 
-    queueMetadataSave();
+    setSelectedSheet((prev) => (
+      !prev || prev._id !== sheetId
+        ? prev
+        : {
+            ...prev,
+            meta: {
+              ...prev.meta,
+              versions: [data, ...(prev.meta?.versions || [])].slice(0, 10),
+            },
+          }
+    ));
+
+    setSavingStatus("");
     showMessage("Version saved");
   };
 
-  const restoreVersion = (index) => {
+  const restoreVersion = async (index) => {
     const version = selectedSheet?.meta?.versions?.[index];
-    if (!version) return;
+    if (!version?._id || !selectedSheet) return;
 
-    setSelectedSheet((prev) => ({
-      ...prev,
-      data: normalizeData(version.data),
-      meta: { ...prev.meta, ...(version.meta || {}) },
-    }));
+    setSavingStatus("Restoring version...");
+    const res = await authFetch(
+      API_URL + "/sheet/" + selectedSheet._id + "/versions/" + version._id + "/restore",
+      { method: "POST" }
+    );
+    const data = await res.json();
 
-    queueMetadataSave();
+    if (!res.ok) {
+      setSavingStatus("");
+      showMessage(data.message || "Failed to restore version");
+      return;
+    }
+
+    sheetLoadCacheRef.current.delete(selectedSheet._id);
+    await openSheet(selectedSheet._id);
+    setSavingStatus("");
+    showMessage("Version restored");
   };
 
   const loadExcelTools = async () => import("xlsx");

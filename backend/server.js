@@ -4,6 +4,8 @@ const express = require("express");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+const zlib = require("node:zlib");
+const { promisify } = require("node:util");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const compression = require("compression");
@@ -15,6 +17,7 @@ const { Server } = require("socket.io");
 const User = require("./models/User");
 const Sheet = require("./models/Sheet");
 const SheetRow = require("./models/SheetRow");
+const SheetVersion = require("./models/SheetVersion");
 const Workspace = require("./models/Workspace");
 const ChangeLog = require("./models/ChangeLog");
 const authRoutes = require("./routes/authRoutes");
@@ -82,6 +85,8 @@ const {
 
 const app = express();
 const server = http.createServer(app);
+const gzipAsync = promisify(zlib.gzip);
+const gunzipAsync = promisify(zlib.gunzip);
 
 const PORT = process.env.PORT || 5000;
 const FRONTEND_URLS = getFrontendUrls();
@@ -233,6 +238,18 @@ const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
+const sanitizeSheetMeta = (meta = {}) => {
+  const source = typeof meta?.toObject === "function" ? meta.toObject() : meta;
+  const defaults = createDefaultMeta();
+
+  return {
+    colWidths: source?.colWidths || defaults.colWidths,
+    rowHeights: source?.rowHeights || defaults.rowHeights,
+    merges: Array.isArray(source?.merges) ? source.merges : [],
+    versions: [],
+  };
+};
+
 const buildRowSearchFields = (cells = []) => {
   const searchText = buildRowSearchText(cells);
 
@@ -290,7 +307,7 @@ const updateSheetAnalytics = async (sheet, userEmail, options = {}) => {
 };
 
 const findSheetForUser = async (sheetId, userId) => {
-  const sheet = await Sheet.findById(sheetId).select("-data");
+  const sheet = await Sheet.findById(sheetId).select("-data -meta.versions");
 
   if (!sheet) {
     return { sheet: null, role: null };
@@ -1371,11 +1388,21 @@ app.put("/sheet/:id", auth, async (req, res) => {
       return res.status(403).json({ message: "You do not have edit permission" });
     }
 
-    sheet.meta = req.body.meta || sheet.meta || createDefaultMeta();
+    const nextMeta = sanitizeSheetMeta(req.body.meta || sheet.meta || createDefaultMeta());
 
     await migrateSheetRowsIfNeeded(sheet);
 
-    await sheet.save();
+    await Sheet.updateOne(
+      { _id: sheet._id },
+      {
+        $set: {
+          "meta.colWidths": nextMeta.colWidths,
+          "meta.rowHeights": nextMeta.rowHeights,
+          "meta.merges": nextMeta.merges,
+        },
+      }
+    );
+    sheet.meta = nextMeta;
     await updateSheetAnalytics(sheet, req.user.email, {
       totalFormulaCells: await countFormulaCellsInRows(sheet._id),
     });
@@ -1393,7 +1420,7 @@ app.put("/sheet/:id", auth, async (req, res) => {
       changeType: "import",
     });
 
-    const updatedSheet = await Sheet.findById(sheet._id).select("-data");
+    const updatedSheet = await Sheet.findById(sheet._id).select("-data -meta.versions");
     const sheetObject = updatedSheet.toObject();
     sheetObject.data = [];
 
@@ -1708,6 +1735,7 @@ app.delete("/sheet/:id", auth, async (req, res) => {
 
     await ChangeLog.deleteMany({ sheetId: sheet._id });
     await SheetRow.deleteMany({ sheetId: sheet._id });
+    await SheetVersion.deleteMany({ sheetId: sheet._id });
     sheetRowCountCache.delete(sheet._id.toString());
     await Sheet.deleteOne({ _id: sheet._id });
 
@@ -1757,6 +1785,171 @@ app.patch("/sheet/:id/erp-options", auth, async (req, res) => {
     res.json({ ok: true, erpOptions: sheet.erpOptions });
   } catch (error) {
     res.status(500).json({ message: "Failed to update ERP options" });
+  }
+});
+
+/* SHEET VERSIONS */
+
+const MAX_SHEET_VERSIONS = 10;
+const MAX_VERSION_SNAPSHOT_BYTES = 12 * 1024 * 1024;
+
+const toVersionSummary = (version) => ({
+  _id: version._id,
+  createdAt: version.createdAt,
+  createdByEmail: version.createdByEmail || "",
+  rowCount: version.rowCount || 0,
+  sizeBytes: version.sizeBytes || 0,
+});
+
+app.get("/sheet/:id/versions", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+    if (!sheet || !canRead(role)) {
+      return res.status(404).json({ message: "Sheet not found or access denied" });
+    }
+
+    const versions = await SheetVersion.find({ sheetId: sheet._id })
+      .sort({ createdAt: -1 })
+      .limit(MAX_SHEET_VERSIONS)
+      .select("createdAt createdByEmail rowCount sizeBytes")
+      .lean();
+
+    res.json(versions.map(toVersionSummary));
+  } catch (error) {
+    res.status(500).json({ message: "Failed to load sheet versions" });
+  }
+});
+
+app.post("/sheet/:id/versions", auth, async (req, res) => {
+  try {
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    await migrateSheetRowsIfNeeded(sheet);
+    const rows = await SheetRow.find({ sheetId: sheet._id })
+      .sort({ rowIndex: 1 })
+      .select("rowIndex cells ownerId ownerEmail ownerUsername")
+      .lean();
+    const snapshotPayload = {
+      meta: sanitizeSheetMeta(sheet.meta),
+      rows: rows.map((row) => ({
+        rowIndex: row.rowIndex,
+        cells: compactRowCells(row.cells),
+        ownerId: row.ownerId || null,
+        ownerEmail: row.ownerEmail || "",
+        ownerUsername: row.ownerUsername || "",
+      })),
+    };
+    const snapshot = await gzipAsync(Buffer.from(JSON.stringify(snapshotPayload)));
+
+    if (snapshot.length > MAX_VERSION_SNAPSHOT_BYTES) {
+      return res.status(413).json({ message: "Sheet version is too large to store" });
+    }
+
+    const version = await SheetVersion.create({
+      sheetId: sheet._id,
+      createdBy: req.user.id,
+      createdByEmail: req.user.email,
+      rowCount: rows.length,
+      sizeBytes: snapshot.length,
+      snapshot,
+    });
+    const obsoleteVersions = await SheetVersion.find({ sheetId: sheet._id })
+      .sort({ createdAt: -1 })
+      .skip(MAX_SHEET_VERSIONS)
+      .select("_id")
+      .lean();
+    if (obsoleteVersions.length > 0) {
+      await SheetVersion.deleteMany({ _id: { $in: obsoleteVersions.map(({ _id }) => _id) } });
+    }
+
+    res.status(201).json(toVersionSummary(version));
+  } catch (error) {
+    res.status(500).json({ message: "Failed to save sheet version" });
+  }
+});
+
+app.post("/sheet/:id/versions/:versionId/restore", auth, async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.versionId)) {
+      return rejectInvalidId(res, "version id");
+    }
+
+    const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+    if (!sheet || !canEdit(role)) {
+      return res.status(403).json({ message: "You do not have edit permission" });
+    }
+
+    const version = await SheetVersion.findOne({
+      _id: req.params.versionId,
+      sheetId: sheet._id,
+    }).select("+snapshot");
+    if (!version) {
+      return res.status(404).json({ message: "Sheet version not found" });
+    }
+
+    const snapshot = JSON.parse((await gunzipAsync(version.snapshot)).toString("utf8"));
+    const snapshotRows = Array.isArray(snapshot.rows) ? snapshot.rows : [];
+    const rowOperations = snapshotRows
+      .filter((row) => isValidCellIndex(Number(row.rowIndex)) && rowHasStoredData(row.cells))
+      .map((row) => {
+        const hasProtectedContent = rowHasProtectedContent(row.cells);
+        return {
+          updateOne: {
+            filter: { sheetId: sheet._id, rowIndex: Number(row.rowIndex) },
+            update: {
+              $set: {
+                sheetId: sheet._id,
+                rowIndex: Number(row.rowIndex),
+                cells: normalizeRowCells(row.cells),
+                ...buildRowSearchFields(row.cells),
+                ownerId: row.ownerId || (hasProtectedContent ? sheet.createdBy : null),
+                ownerEmail: row.ownerEmail || "",
+                ownerUsername: row.ownerUsername || row.ownerEmail || "",
+              },
+            },
+            upsert: true,
+          },
+        };
+      });
+
+    await runWithOptionalTransaction(async (session) => {
+      const queryOptions = session ? { session } : undefined;
+      await SheetRow.deleteMany({ sheetId: sheet._id }, queryOptions);
+      if (rowOperations.length > 0) {
+        await SheetRow.bulkWrite(rowOperations, queryOptions);
+      }
+      await Sheet.updateOne(
+        { _id: sheet._id },
+        { $set: { meta: sanitizeSheetMeta(snapshot.meta), data: [], storageVersion: 2 } },
+        queryOptions
+      );
+      await updateSheetAnalytics(sheet, req.user.email, {
+        totalFormulaCells: await countFormulaCellsInRows(sheet._id, session),
+        totalMergedCells: sanitizeSheetMeta(snapshot.meta).merges.length,
+        session,
+      });
+    });
+    sheetRowCountCache.delete(sheet._id.toString());
+
+    await ChangeLog.create({
+      sheetId: sheet._id,
+      workspaceId: sheet.workspaceId || null,
+      userId: req.user.id,
+      userEmail: req.user.email,
+      rowIndex: 0,
+      colIndex: 0,
+      cellAddress: "FULL_SHEET",
+      oldValue: "Current sheet state",
+      newValue: `Restored version ${version._id}`,
+      changeType: "import",
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to restore sheet version" });
   }
 });
 

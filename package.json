@@ -9,6 +9,7 @@
     "lint": "npm --prefix frontend run lint",
     "build": "npm --prefix frontend run build",
     "migrate:rows": "npm --prefix backend run migrate:rows",
+    "migrate:versions": "npm --prefix backend run migrate:versions",
     "test": "npm --prefix backend test"
   }
 }
