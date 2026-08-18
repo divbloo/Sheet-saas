@@ -70,7 +70,7 @@ const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
 const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
 const ITEM_CODING_OPTIONS_CACHE_MS = 5 * 60 * 1000;
 const SHEET_PREFETCH_CACHE_MS = 30 * 1000;
-const SHEET_PREFETCH_LIMIT = 3;
+const SHEET_PREFETCH_LIMIT = 1;
 const getCurrentTimestamp = () => Date.now();
 const getPerformanceTimestamp = () => performance.now();
 
@@ -156,6 +156,10 @@ function App() {
   const pendingCellSaveRef = useRef(null);
   const localCellDraftsRef = useRef(new Map());
   const rowsLoadingRef = useRef(false);
+  const rowIndexesLoadingRef = useRef(new Map());
+  const rowLoadCounterRef = useRef(0);
+  const virtualRowLoadInFlightRef = useRef(false);
+  const pendingVirtualRangeRef = useRef(null);
   const scrollFrameRef = useRef(null);
   const fileInputRef = useRef(null);
   const codingFileInputRef = useRef(null);
@@ -615,6 +619,8 @@ function App() {
   const openSheet = async (id) => {
     const openStartedAt = getPerformanceTimestamp();
     flushPendingCellSave();
+    pendingVirtualRangeRef.current = null;
+    rowIndexesLoadingRef.current.clear();
 
     if (socketRef.current && selectedSheet?._id) {
       socketRef.current.emit("leave-sheet", selectedSheet._id);
@@ -646,6 +652,7 @@ function App() {
     const initialVisibleRows = Math.min(totalRows, Math.max(INITIAL_VISIBLE_ROWS, rowStart + normalized.data.length));
     const initialScrollTop = Math.max(0, lastDataRowIndex * DEFAULT_ROW_HEIGHT);
 
+    selectedSheetRef.current = focusedSheet;
     setSelectedSheet(focusedSheet);
     setSheetRowTotal(totalRows);
     setErpOptions(normalized.erpOptions || defaultErpOptions);
@@ -661,7 +668,11 @@ function App() {
     setPendingCodeCursor(null);
     setServerPendingCodeRows([]);
 
-    void loadPendingCodeRows(id).catch(() => {});
+    window.setTimeout(() => {
+      if (selectedSheetRef.current?._id === id) {
+        void loadPendingCodeRows(id).catch(() => {});
+      }
+    }, 1500);
 
     if (socketRef.current?.connected) {
       socketRef.current.emit("join-sheet", id);
@@ -1425,42 +1436,13 @@ function App() {
     if (loadedRows >= sheetRowTotal) return;
 
     rowsLoadingRef.current = true;
-    setRowsLoading(true);
 
     try {
-      const res = await authFetch(
-        API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + ROW_LOAD_STEP
-      );
-      const data = await res.json();
-
-      if (!res.ok) {
-        showMessage(data.message || "Failed to load rows");
-        return;
-      }
-
-      const responseStart = Number.isInteger(data.start) ? data.start : loadedRows;
-      const expectedRowCount = Math.min(ROW_LOAD_STEP, sheetRowTotal - responseStart);
-      const normalizedRows = normalizeData(data.rows || [], expectedRowCount).slice(0, expectedRowCount);
-
-      setSelectedSheet((prev) => {
-        if (!prev || prev._id !== selectedSheet._id) return prev;
-
-        return {
-          ...prev,
-          data: mergeRowsAtStart(prev.data, normalizedRows, responseStart),
-          rowOwners: { ...(prev.rowOwners || {}), ...(data.rowOwners || {}) },
-        };
-      });
-      setSheetRowTotal(normalizeRowTotal(data.total, sheetRowTotal));
-      setVisibleRows((count) => Math.min(
-        Math.max(count + ROW_LOAD_STEP, responseStart + normalizedRows.length),
-        normalizeRowTotal(data.total, sheetRowTotal)
-      ));
-    } catch {
-      showMessage("Failed to load rows");
+      const targetEnd = Math.min(loadedRows + ROW_LOAD_STEP, sheetRowTotal);
+      await ensureRowsLoaded(targetEnd, { start: loadedRows });
+      setVisibleRows((count) => Math.max(count, targetEnd));
     } finally {
       rowsLoadingRef.current = false;
-      setRowsLoading(false);
     }
   };
 
@@ -1484,9 +1466,16 @@ function App() {
   };
 
   const ensureRowsLoaded = async (targetCount, options = {}) => {
-    if (!selectedSheet) return;
+    const activeSheet = selectedSheetRef.current || selectedSheet;
+    if (!activeSheet) return;
 
-    const loadedRowMap = selectedSheet.data || [];
+    const sheetId = activeSheet._id;
+    const loadedRowMap = activeSheet.data || [];
+    let requestedRows = rowIndexesLoadingRef.current.get(sheetId);
+    if (!requestedRows) {
+      requestedRows = new Set();
+      rowIndexesLoadingRef.current.set(sheetId, requestedRows);
+    }
     const targetEnd = Math.min(Math.max(targetCount, 0), sheetRowTotal);
     const targetStart = Math.max(0, Number(options.start ?? Math.max(0, targetEnd - ROW_LOAD_STEP)));
     if (targetEnd <= targetStart) return;
@@ -1495,7 +1484,7 @@ function App() {
     let rangeStart = null;
 
     for (let rowIndex = targetStart; rowIndex < targetEnd; rowIndex += 1) {
-      if (loadedRowMap[rowIndex]) {
+      if (loadedRowMap[rowIndex] || requestedRows.has(rowIndex)) {
         if (rangeStart !== null) {
           missingRanges.push({ start: rangeStart, end: rowIndex });
           rangeStart = null;
@@ -1508,6 +1497,7 @@ function App() {
     if (rangeStart !== null) missingRanges.push({ start: rangeStart, end: targetEnd });
     if (!missingRanges.length) return;
 
+    rowLoadCounterRef.current += 1;
     setRowsLoading(true);
 
     const loadedChunks = [];
@@ -1518,11 +1508,26 @@ function App() {
         let loadedRows = range.start;
 
         while (loadedRows < range.end) {
+          if (options.signal?.aborted) return;
+
           const limit = Math.min(ROW_LOAD_STEP, range.end - loadedRows);
-          const res = await authFetch(
-            API_URL + "/sheet/" + selectedSheet._id + "/rows?start=" + loadedRows + "&limit=" + limit
+          const requestedIndexes = Array.from(
+            { length: limit },
+            (_, offset) => loadedRows + offset
           );
-          const data = await res.json();
+          requestedIndexes.forEach((rowIndex) => requestedRows.add(rowIndex));
+
+          let res;
+          let data;
+          try {
+            res = await authFetch(
+              API_URL + "/sheet/" + sheetId + "/rows?start=" + loadedRows + "&limit=" + limit,
+              { signal: options.signal }
+            );
+            data = await res.json();
+          } finally {
+            requestedIndexes.forEach((rowIndex) => requestedRows.delete(rowIndex));
+          }
 
           if (!res.ok) {
             showMessage(data.message || "Failed to load rows");
@@ -1542,22 +1547,45 @@ function App() {
 
       if (loadedChunks.length > 0) {
         setSelectedSheet((prev) => {
-          if (!prev || prev._id !== selectedSheet._id) return prev;
+          if (!prev || prev._id !== sheetId) return prev;
 
           const nextData = loadedChunks.reduce(
             (rows, chunk) => mergeRowsAtStart(rows, chunk.rows, chunk.start),
             prev.data
           );
 
-          return {
+          const nextSheet = {
             ...prev,
             data: nextData,
             rowOwners: { ...(prev.rowOwners || {}), ...loadedRowOwners },
           };
+          selectedSheetRef.current = nextSheet;
+          return nextSheet;
         });
       }
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        showMessage("Failed to load rows");
+      }
     } finally {
-      setRowsLoading(false);
+      rowLoadCounterRef.current = Math.max(0, rowLoadCounterRef.current - 1);
+      setRowsLoading(rowLoadCounterRef.current > 0);
+    }
+  };
+
+  const queueVirtualRowsLoad = async (start, end) => {
+    pendingVirtualRangeRef.current = { start, end };
+    if (virtualRowLoadInFlightRef.current) return;
+
+    virtualRowLoadInFlightRef.current = true;
+    try {
+      while (pendingVirtualRangeRef.current) {
+        const range = pendingVirtualRangeRef.current;
+        pendingVirtualRangeRef.current = null;
+        await ensureRowsLoaded(range.end, { start: range.start });
+      }
+    } finally {
+      virtualRowLoadInFlightRef.current = false;
     }
   };
 
@@ -2559,8 +2587,8 @@ function App() {
     if (!selectedSheet?._id || virtualRowEnd <= virtualRowStart) return undefined;
 
     const timer = window.setTimeout(() => {
-      void ensureRowsLoaded(virtualRowEnd, { start: virtualRowStart });
-    }, 0);
+      void queueVirtualRowsLoad(virtualRowStart, virtualRowEnd);
+    }, 150);
 
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps

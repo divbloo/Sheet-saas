@@ -496,9 +496,20 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
   };
 };
 
+const sheetRowCountCache = new Map();
+const SHEET_ROW_COUNT_CACHE_MS = 30 * 1000;
+
 const getSheetRowCount = async (sheetId) => {
+  const cacheKey = sheetId.toString();
+  const cached = sheetRowCountCache.get(cacheKey);
+  if (cached && Date.now() - cached.loadedAt < SHEET_ROW_COUNT_CACHE_MS) {
+    return cached.count;
+  }
+
   const lastRow = await SheetRow.findOne({ sheetId }).sort({ rowIndex: -1 }).select("rowIndex").lean();
-  return Math.max(DEFAULT_SHEET_ROWS, lastRow ? lastRow.rowIndex + 1 : 0);
+  const count = Math.max(DEFAULT_SHEET_ROWS, lastRow ? lastRow.rowIndex + 1 : 0);
+  sheetRowCountCache.set(cacheKey, { count, loadedAt: Date.now() });
+  return count;
 };
 
 const getLastDataRowIndex = async (sheetId) => {
@@ -823,6 +834,15 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
 
   if (rowOperations.length > 0) {
     await SheetRow.bulkWrite(rowOperations);
+    const highestRowIndex = Math.max(...rowIndexes);
+    const cacheKey = sheet._id.toString();
+    const cachedCount = sheetRowCountCache.get(cacheKey);
+    if (cachedCount && highestRowIndex + 1 > cachedCount.count) {
+      sheetRowCountCache.set(cacheKey, {
+        count: highestRowIndex + 1,
+        loadedAt: Date.now(),
+      });
+    }
   }
 
   if (changeLogs.length > 0) {
@@ -1008,18 +1028,28 @@ app.get("/sheets", auth, async (req, res) => {
 
 app.get("/sheet/:id", auth, async (req, res) => {
   try {
+    const routeStartedAt = process.hrtime.bigint();
+    const stepTimes = [];
+    let previousStepAt = routeStartedAt;
+    const markStep = (name) => {
+      const now = process.hrtime.bigint();
+      stepTimes.push(`${name}=${(Number(now - previousStepAt) / 1e6).toFixed(1)}ms`);
+      previousStepAt = now;
+    };
     const rowLimit = Math.min(
       Number.parseInt(req.query.rowLimit, 10) || DEFAULT_ROW_PAGE_SIZE,
       MAX_ROW_PAGE_SIZE
     );
     const focusLastDataRow = req.query.focus === "lastData";
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+    markStep("permission");
 
     if (!sheet || !canRead(role)) {
       return res.status(404).json({ message: "Sheet not found or access denied" });
     }
 
     await migrateSheetRowsIfNeeded(sheet);
+    markStep("migration");
 
     let sheetChanged = false;
     if (!sheet.meta) {
@@ -1035,11 +1065,13 @@ app.get("/sheet/:id", auth, async (req, res) => {
     if (sheetChanged) {
       await sheet.save();
     }
+    markStep("metadata");
 
     const [totalRows, lastDataRowIndex] = await Promise.all([
       getSheetRowCount(req.params.id),
       focusLastDataRow ? getLastDataRowIndex(sheet._id) : Promise.resolve(0),
     ]);
+    markStep("stats");
     const rowStart = focusLastDataRow
       ? Math.max(0, Math.min(lastDataRowIndex, totalRows - 1) - Math.floor(rowLimit / 2))
       : Math.max(0, Number.parseInt(req.query.rowStart, 10) || 0);
@@ -1048,9 +1080,15 @@ app.get("/sheet/:id", auth, async (req, res) => {
       rowStart,
       Math.max(0, Math.min(rowLimit, totalRows - rowStart))
     );
+    markStep("rows");
     const sheetObject = sheet.toObject();
     sheetObject.data = rowsResult.data;
     sheetObject.rowOwners = rowsResult.rowOwners;
+
+    const totalElapsedMs = Number(process.hrtime.bigint() - routeStartedAt) / 1e6;
+    if (totalElapsedMs >= perfLogThresholdMs) {
+      console.log(`[perf-db] open-sheet ${stepTimes.join(" ")}`);
+    }
 
     sendJson(req, res, {
       sheet: sheetObject,
@@ -1069,6 +1107,14 @@ app.get("/sheet/:id", auth, async (req, res) => {
 
 app.get("/sheet/:id/rows", auth, async (req, res) => {
   try {
+    const routeStartedAt = process.hrtime.bigint();
+    const stepTimes = [];
+    let previousStepAt = routeStartedAt;
+    const markStep = (name) => {
+      const now = process.hrtime.bigint();
+      stepTimes.push(`${name}=${(Number(now - previousStepAt) / 1e6).toFixed(1)}ms`);
+      previousStepAt = now;
+    };
     const start = Math.max(0, Number.parseInt(req.query.start, 10) || 0);
     const limit = Math.min(
       Math.max(1, Number.parseInt(req.query.limit, 10) || DEFAULT_ROW_PAGE_SIZE),
@@ -1076,19 +1122,28 @@ app.get("/sheet/:id/rows", auth, async (req, res) => {
     );
 
     const { sheet, role } = await findSheetForUser(req.params.id, req.user.id);
+    markStep("permission");
 
     if (!sheet || !canRead(role)) {
       return res.status(404).json({ message: "Sheet not found or access denied" });
     }
 
     await migrateSheetRowsIfNeeded(sheet);
+    markStep("migration");
 
     const totalRows = await getSheetRowCount(req.params.id);
+    markStep("count");
     const rowsResult = await getRowsForSheet(
       sheet._id,
       start,
       Math.max(0, Math.min(limit, totalRows - start))
     );
+    markStep("rows");
+
+    const totalElapsedMs = Number(process.hrtime.bigint() - routeStartedAt) / 1e6;
+    if (totalElapsedMs >= perfLogThresholdMs) {
+      console.log(`[perf-db] sheet-rows ${stepTimes.join(" ")}`);
+    }
 
     sendJson(req, res, {
       rows: rowsResult.data,
@@ -1409,6 +1464,7 @@ app.post("/sheet/:id/import-rows", auth, async (req, res) => {
         session,
       });
     });
+    sheetRowCountCache.delete(sheet._id.toString());
 
     res.json({
       ok: true,
@@ -1652,6 +1708,7 @@ app.delete("/sheet/:id", auth, async (req, res) => {
 
     await ChangeLog.deleteMany({ sheetId: sheet._id });
     await SheetRow.deleteMany({ sheetId: sheet._id });
+    sheetRowCountCache.delete(sheet._id.toString());
     await Sheet.deleteOne({ _id: sheet._id });
 
     io.to(req.params.id).emit("sheet-deleted", {
