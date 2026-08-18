@@ -122,8 +122,8 @@ export const INITIAL_VISIBLE_ROWS = 50;
 export const ROW_LOAD_STEP = 100;
 export const CONTEXT_MENU_MARGIN = 8;
 export const CELL_SAVE_DEBOUNCE_MS = 400;
-export const VIRTUAL_ROW_BUFFER = 12;
-export const VIRTUAL_ROW_WINDOW = 90;
+export const VIRTUAL_ROW_BUFFER = 8;
+export const VIRTUAL_ROW_WINDOW = 40;
 export const AUTO_FIT_SAMPLE_ROWS = 60;
 export const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 

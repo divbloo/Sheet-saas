@@ -5,6 +5,7 @@ const {
   buildRowSearchText,
   buildRowSearchTokens,
   buildSearchQueryTokens,
+  compactRowCells,
   normalizeRowCells,
   rowHasStoredData,
 } = require("../utils/sheetRows");
@@ -26,6 +27,15 @@ test("normalizeRowCells drops the legacy package column", () => {
   assert.equal(row[7].value, "C7");
   assert.equal(row[8].value, "C9");
   assert.equal(row[13].value, "C14");
+});
+
+test("compactRowCells removes default styles and trailing empty cells", () => {
+  assert.deepEqual(compactRowCells([]), []);
+  assert.deepEqual(compactRowCells([{ value: "Item" }]), ["Item"]);
+  assert.deepEqual(
+    compactRowCells([{ value: "", style: { backgroundColor: "#ff0000" } }]),
+    [{ value: "", formula: "", style: { backgroundColor: "#ff0000" } }]
+  );
 });
 
 test("buildRowSearchText includes cell values and formulas", () => {

@@ -6,6 +6,7 @@ const http = require("http");
 const path = require("path");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const compression = require("compression");
 const jwt = require("jsonwebtoken");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
@@ -59,6 +60,7 @@ const {
   buildRowSearchText,
   buildRowSearchTokens,
   buildSearchQueryTokens,
+  compactRowCells,
   defaultCellStyle,
   normalizeRowCells,
   rowHasStoredData,
@@ -108,6 +110,7 @@ const io = new Server(server, {
 
 app.use(helmet(createHelmetOptions()));
 app.use(cors(corsOptions));
+app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "15mb" }));
 
 app.use(
@@ -471,7 +474,7 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
     .sort({ rowIndex: 1 })
     .select("rowIndex cells ownerId ownerEmail ownerUsername")
     .lean();
-  const rowMap = new Map(rows.map((row) => [row.rowIndex, normalizeRowCells(row.cells)]));
+  const rowMap = new Map(rows.map((row) => [row.rowIndex, compactRowCells(row.cells)]));
   const rowOwners = Object.fromEntries(
     rows
       .filter((row) => row.ownerId)
@@ -487,7 +490,7 @@ const getRowsForSheet = async (sheetId, start = 0, limit = DEFAULT_ROW_PAGE_SIZE
 
   return {
     data: Array.from({ length: limit }, (_, offset) => (
-      rowMap.get(start + offset) || normalizeRowCells([])
+      rowMap.get(start + offset) || []
     )),
     rowOwners,
   };

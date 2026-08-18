@@ -69,6 +69,10 @@ const TAX_EXPORT_FILE_NAME = "NewCodeBulkTemplate (2).xlsx";
 const DESCRIPTION_BUILDER_COLUMN_INDEX = 0;
 const EMPTY_DESCRIPTION_OPTIONS = { fields: [], rows: [] };
 const ITEM_CODING_OPTIONS_CACHE_MS = 5 * 60 * 1000;
+const SHEET_PREFETCH_CACHE_MS = 30 * 1000;
+const SHEET_PREFETCH_LIMIT = 3;
+const getCurrentTimestamp = () => Date.now();
+const getPerformanceTimestamp = () => performance.now();
 
 function App() {
   const [mode, setMode] = useState("login");
@@ -156,6 +160,8 @@ function App() {
   const fileInputRef = useRef(null);
   const codingFileInputRef = useRef(null);
   const itemDescriptionOptionsLoadedAtRef = useRef(0);
+  const sheetLoadCacheRef = useRef(new Map());
+  const sheetLoadInFlightRef = useRef(new Map());
   const contextMenuRef = useRef(null);
   const gridRef = useRef(null);
 
@@ -451,6 +457,43 @@ function App() {
     if (res.ok) setWorkspaces(data);
   };
 
+  const fetchSheetPayload = (sheetId, options = {}) => {
+    const cached = sheetLoadCacheRef.current.get(sheetId);
+
+    if (
+      !options.force &&
+      cached &&
+      getCurrentTimestamp() - cached.loadedAt < SHEET_PREFETCH_CACHE_MS
+    ) {
+      return Promise.resolve({ ok: true, data: cached.data, source: "cache" });
+    }
+
+    const existingRequest = sheetLoadInFlightRef.current.get(sheetId);
+    if (existingRequest) return existingRequest;
+
+    const request = authFetch(
+      API_URL + "/sheet/" + sheetId + "?rowLimit=" + INITIAL_VISIBLE_ROWS + "&focus=lastData"
+    )
+      .then(async (res) => {
+        const data = await res.json();
+        if (res.ok) {
+          sheetLoadCacheRef.current.set(sheetId, { data, loadedAt: getCurrentTimestamp() });
+        }
+        return { ok: res.ok, data, source: "network" };
+      })
+      .finally(() => {
+        sheetLoadInFlightRef.current.delete(sheetId);
+      });
+
+    sheetLoadInFlightRef.current.set(sheetId, request);
+    return request;
+  };
+
+  const prefetchSheet = (sheetId) => {
+    if (!sheetId || selectedSheetRef.current?._id === sheetId) return;
+    void fetchSheetPayload(sheetId).catch(() => {});
+  };
+
   const createWorkspace = async () => {
     const res = await authFetch(API_URL + "/workspaces", {
       method: "POST",
@@ -502,7 +545,12 @@ function App() {
 
     const res = await authFetch(url);
     const data = await res.json();
-    if (res.ok) setSheets(data);
+    if (res.ok) {
+      setSheets(data);
+      data.slice(0, SHEET_PREFETCH_LIMIT).forEach((sheet, index) => {
+        window.setTimeout(() => prefetchSheet(sheet._id), 250 + (index * 200));
+      });
+    }
   };
 
   const loadAnalytics = async () => {
@@ -565,19 +613,29 @@ function App() {
   };
 
   const openSheet = async (id) => {
+    const openStartedAt = getPerformanceTimestamp();
     flushPendingCellSave();
 
     if (socketRef.current && selectedSheet?._id) {
       socketRef.current.emit("leave-sheet", selectedSheet._id);
     }
 
-    const res = await authFetch(API_URL + "/sheet/" + id + "?rowLimit=" + INITIAL_VISIBLE_ROWS + "&focus=lastData");
-    const data = await res.json();
+    let response;
+    try {
+      response = await fetchSheetPayload(id);
+    } catch {
+      showMessage("Cannot load sheet from server");
+      return;
+    }
 
-    if (!res.ok) {
+    const { ok, data, source } = response;
+
+    if (!ok) {
       showMessage(data.message || "Failed to open sheet");
       return;
     }
+
+    sheetLoadCacheRef.current.delete(id);
 
     const normalized = normalizeSheet(data.sheet, { minRows: 0 });
     const rowStart = Number(data.rows?.start || 0);
@@ -605,13 +663,20 @@ function App() {
 
     void loadPendingCodeRows(id).catch(() => {});
 
-    window.requestAnimationFrame(() => {
-      if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
-    });
-
     if (socketRef.current?.connected) {
       socketRef.current.emit("join-sheet", id);
     }
+
+    window.requestAnimationFrame(() => {
+      if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
+      window.requestAnimationFrame(() => {
+        const elapsedMs = getPerformanceTimestamp() - openStartedAt;
+        const renderedCellCount = gridRef.current?.querySelectorAll("td").length || 0;
+        console.info(
+          `[perf-ui] sheet-painted ${id} ${source} ${elapsedMs.toFixed(1)}ms cells=${renderedCellCount}`
+        );
+      });
+    });
   };
 
   const saveErpOptions = async (newOptions) => {
@@ -2339,6 +2404,8 @@ function App() {
 
   const logout = () => {
     flushPendingCellSave();
+    sheetLoadCacheRef.current.clear();
+    sheetLoadInFlightRef.current.clear();
     sessionStorage.removeItem("token");
     setToken("");
     setCurrentUser(null);
@@ -3134,7 +3201,13 @@ function App() {
               onChange={(e) => setSheetSearch(e.target.value)}
             />
             {filteredSheets.map((s) => (
-              <button className="drawer-item" key={s._id} onClick={() => openSheet(s._id)}>
+              <button
+                className="drawer-item"
+                key={s._id}
+                onMouseEnter={() => prefetchSheet(s._id)}
+                onFocus={() => prefetchSheet(s._id)}
+                onClick={() => openSheet(s._id)}
+              >
                 {s.name}
               </button>
             ))}
@@ -3585,7 +3658,7 @@ function App() {
                           {dropdownOptions ? (
                             <>
                               <input
-                                list={`options-${rowIndex}-${colIndex}`}
+                                list={isSelected ? `options-${rowIndex}-${colIndex}` : undefined}
                                 value={normalizedCell.value}
                                 readOnly={!cellCanEdit}
                                 style={{
@@ -3602,11 +3675,13 @@ function App() {
                                 onChange={(e) => updateCell(rowIndex, colIndex, e.target.value)}
                                 onBlur={() => validateErpOption(rowIndex, colIndex, dropdownOptions)}
                               />
-                              <datalist id={`options-${rowIndex}-${colIndex}`}>
-                                {dropdownOptions.map((option) => (
-                                  <option key={option} value={option} />
-                                ))}
-                              </datalist>
+                              {isSelected && (
+                                <datalist id={`options-${rowIndex}-${colIndex}`}>
+                                  {dropdownOptions.map((option) => (
+                                    <option key={option} value={option} />
+                                  ))}
+                                </datalist>
+                              )}
                             </>
                           ) : (
                             <div className={isDescriptionCell ? "description-builder-cell" : ""}>

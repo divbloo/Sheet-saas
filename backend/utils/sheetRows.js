@@ -42,6 +42,28 @@ const normalizeRowCells = (cells = []) => {
   });
 };
 
+const compactRowCells = (cells = []) => {
+  const compactCells = normalizeRowCells(cells).map((cell) => {
+    const style = Object.fromEntries(
+      Object.entries(cell.style || {}).filter(([key, value]) => value !== defaultCellStyle[key])
+    );
+    const hasCustomStyle = Object.keys(style).length > 0;
+    const formula = cell.formula || "";
+    const value = cell.value ?? "";
+
+    if (!formula && !hasCustomStyle) {
+      return typeof value === "string" ? value : { value, formula: "" };
+    }
+    return { value, formula, ...(hasCustomStyle ? { style } : {}) };
+  });
+
+  while (compactCells.length > 0 && compactCells[compactCells.length - 1] === "") {
+    compactCells.pop();
+  }
+
+  return compactCells;
+};
+
 const buildRowSearchText = (cells = []) => {
   return normalizeRowCells(cells)
     .map((cell) => `${cell.value ?? ""} ${cell.formula || ""}`)
@@ -115,6 +137,7 @@ module.exports = {
   defaultCellStyle,
   createCell,
   normalizeRowCells,
+  compactRowCells,
   buildRowSearchText,
   buildRowSearchTokens,
   buildSearchQueryTokens,
