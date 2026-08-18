@@ -61,6 +61,7 @@ const {
   buildSearchQueryTokens,
   defaultCellStyle,
   normalizeRowCells,
+  rowHasStoredData,
 } = require("./utils/sheetRows");
 const { createERPTemplateData } = require("./utils/erpTemplates");
 const { auth } = require("./utils/userHelpers");
@@ -118,6 +119,10 @@ app.use(
 
 const perfLogThresholdMs = Number(process.env.PERF_LOG_THRESHOLD_MS || 250);
 const perfLogPaths = [
+  /^\/login$/,
+  /^\/me$/,
+  /^\/workspaces$/,
+  /^\/sheets$/,
   /^\/sheet\/[^/]+$/,
   /^\/sheet\/[^/]+\/rows$/,
   /^\/sheet\/[^/]+\/search$/,
@@ -225,10 +230,15 @@ const rowHasProtectedContent = (row = []) => normalizeRowCells(row)
   .slice(0, ROW_LOCK_LAST_COLUMN_INDEX + 1)
   .some((cell) => String(cell.value ?? "").trim() || String(cell.formula || "").trim());
 
-const buildRowSearchFields = (cells = []) => ({
-  searchText: buildRowSearchText(cells),
-  searchTokens: buildRowSearchTokens(cells),
-});
+const buildRowSearchFields = (cells = []) => {
+  const searchText = buildRowSearchText(cells);
+
+  return {
+    searchText,
+    searchTokens: buildRowSearchTokens(cells),
+    hasContent: Boolean(searchText),
+  };
+};
 
 const updateSheetAnalytics = async (sheet, userEmail, options = {}) => {
   const lastEditedAt = options.lastEditedAt || new Date();
@@ -277,7 +287,7 @@ const updateSheetAnalytics = async (sheet, userEmail, options = {}) => {
 };
 
 const findSheetForUser = async (sheetId, userId) => {
-  const sheet = await Sheet.findById(sheetId);
+  const sheet = await Sheet.findById(sheetId).select("-data");
 
   if (!sheet) {
     return { sheet: null, role: null };
@@ -338,17 +348,31 @@ const getFormulaCellCount = async (sheet) => {
 const migrateSheetRowsIfNeeded = async (sheet) => {
   if (!sheet) return;
 
-  const sourceRows = Array.isArray(sheet.data) ? sheet.data : [];
-  if (sourceRows.length === 0) return;
+  if (Number(sheet.storageVersion || 0) >= 2) return;
 
   const existingRowCount = await SheetRow.countDocuments({ sheetId: sheet._id });
-  if (existingRowCount > 0) return;
+  if (existingRowCount > 0) {
+    await Sheet.updateOne(
+      { _id: sheet._id },
+      { $set: { data: [], storageVersion: 2 } }
+    );
+    sheet.storageVersion = 2;
+    return;
+  }
 
-  const owner = sheet.collaborators?.find((collaborator) => collaborator.role === "owner");
+  const legacySheet = await Sheet.findById(sheet._id)
+    .select("data createdBy collaborators")
+    .lean();
+  const sourceRows = Array.isArray(legacySheet?.data) ? legacySheet.data : [];
+
+  const owner = legacySheet?.collaborators?.find((collaborator) => collaborator.role === "owner");
+  const storedRows = sourceRows
+    .map((row, rowIndex) => ({ row, rowIndex }))
+    .filter(({ row }) => rowHasStoredData(row));
 
   try {
-    await SheetRow.insertMany(
-      sourceRows.map((row, rowIndex) => {
+    if (storedRows.length > 0) await SheetRow.insertMany(
+      storedRows.map(({ row, rowIndex }) => {
         const hasContent = rowHasProtectedContent(row);
 
         return {
@@ -356,7 +380,7 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
           rowIndex,
           cells: normalizeRowCells(row),
           ...buildRowSearchFields(row),
-          ownerId: hasContent ? sheet.createdBy : null,
+          ownerId: hasContent ? legacySheet.createdBy : null,
           ownerEmail: hasContent ? owner?.email || "" : "",
           ownerUsername: hasContent ? owner?.username || owner?.email || "" : "",
         };
@@ -369,9 +393,11 @@ const migrateSheetRowsIfNeeded = async (sheet) => {
     }
   }
 
-  sheet.data = [];
-  sheet.markModified("data");
-  await sheet.save();
+  await Sheet.updateOne(
+    { _id: sheet._id },
+    { $set: { data: [], storageVersion: 2 } }
+  );
+  sheet.storageVersion = 2;
 };
 
 const ensureSheetRowsSearchText = async (sheetId) => {
@@ -475,13 +501,23 @@ const getSheetRowCount = async (sheetId) => {
 const getLastDataRowIndex = async (sheetId) => {
   const indexedRow = await SheetRow.findOne({
     sheetId,
-    searchText: { $regex: "\\S" },
+    hasContent: true,
   })
     .sort({ rowIndex: -1 })
     .select("rowIndex")
     .lean();
 
   if (indexedRow) return indexedRow.rowIndex;
+
+  const legacyIndexedRow = await SheetRow.findOne({
+    sheetId,
+    searchText: { $nin: ["", null] },
+  })
+    .sort({ rowIndex: -1 })
+    .select("rowIndex")
+    .lean();
+
+  if (legacyIndexedRow) return legacyIndexedRow.rowIndex;
 
   const totalRows = await getSheetRowCount(sheetId);
   const pageSize = 500;
@@ -513,6 +549,7 @@ const ensureSheetRow = async (sheetId, rowIndex) => {
         cells: normalizeRowCells([]),
         searchText: "",
         searchTokens: [],
+        hasContent: false,
       },
     },
     { returnDocument: "after", upsert: true }
@@ -634,6 +671,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
                 cells: normalizeRowCells([]),
                 searchText: "",
                 searchTokens: [],
+                hasContent: false,
               },
             },
             upsert: true,
@@ -753,6 +791,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
     const searchFields = buildRowSearchFields(row.cells);
     row.searchText = searchFields.searchText;
     row.searchTokens = searchFields.searchTokens;
+    row.hasContent = searchFields.hasContent;
 
     if (editsProtectedColumns && !rowHasProtectedContent(row.cells)) {
       row.ownerId = null;
@@ -768,6 +807,7 @@ const applyCellPatchesToRows = async (sheet, user, role, patches) => {
             cells: row.cells,
             searchText: row.searchText,
             searchTokens: row.searchTokens,
+            hasContent: row.hasContent,
             ownerId: row.ownerId || null,
             ownerEmail: row.ownerEmail || "",
             ownerUsername: row.ownerUsername || "",
@@ -890,6 +930,7 @@ app.post("/sheet", auth, async (req, res) => {
       workspaceId,
       createdBy: req.user.id,
       data: [],
+      storageVersion: 2,
       meta: createDefaultMeta(),
       erpTemplate: {
         enabled: isERP,
@@ -952,8 +993,9 @@ app.get("/sheets", auth, async (req, res) => {
     }
 
     const sheets = await Sheet.find(filter)
-      .select("-data")
-      .sort({ updatedAt: -1 });
+      .select("_id name workspaceId erpTemplate updatedAt")
+      .sort({ updatedAt: -1 })
+      .lean();
 
     res.json(sheets);
   } catch (error) {
@@ -991,8 +1033,10 @@ app.get("/sheet/:id", auth, async (req, res) => {
       await sheet.save();
     }
 
-    const totalRows = await getSheetRowCount(req.params.id);
-    const lastDataRowIndex = focusLastDataRow ? await getLastDataRowIndex(sheet._id) : 0;
+    const [totalRows, lastDataRowIndex] = await Promise.all([
+      getSheetRowCount(req.params.id),
+      focusLastDataRow ? getLastDataRowIndex(sheet._id) : Promise.resolve(0),
+    ]);
     const rowStart = focusLastDataRow
       ? Math.max(0, Math.min(lastDataRowIndex, totalRows - 1) - Math.floor(rowLimit / 2))
       : Math.max(0, Number.parseInt(req.query.rowStart, 10) || 0);
@@ -1291,7 +1335,7 @@ app.put("/sheet/:id", auth, async (req, res) => {
       changeType: "import",
     });
 
-    const updatedSheet = await Sheet.findById(sheet._id);
+    const updatedSheet = await Sheet.findById(sheet._id).select("-data");
     const sheetObject = updatedSheet.toObject();
     sheetObject.data = [];
 
@@ -1689,7 +1733,9 @@ app.get("/sheet/:id/changes", auth, async (req, res) => {
 
 app.get("/admin/analytics", auth, async (req, res) => {
   try {
-    const workspaces = await Workspace.find({ "members.userId": req.user.id });
+    const workspaces = await Workspace.find({ "members.userId": req.user.id })
+      .select("_id")
+      .lean();
     const workspaceIds = workspaces.map((workspace) => workspace._id);
 
     const sheets = await Sheet.find({
@@ -1697,7 +1743,9 @@ app.get("/admin/analytics", auth, async (req, res) => {
         { "collaborators.userId": req.user.id },
         { workspaceId: { $in: workspaceIds } },
       ],
-    });
+    })
+      .select("collaborators erpTemplate updatedAt name workspaceId")
+      .lean();
 
     const totalChanges = await ChangeLog.countDocuments({
       $or: [

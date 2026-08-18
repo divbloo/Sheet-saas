@@ -33,4 +33,14 @@ test("SheetRow stores the user who first claimed the row", () => {
   assert.ok(SheetRow.schema.path("ownerEmail"));
   assert.ok(SheetRow.schema.path("ownerUsername"));
   assert.ok(SheetRow.schema.path("searchTokens"));
+  assert.ok(SheetRow.schema.path("hasContent"));
+});
+
+test("SheetRow has a fast last-content-row index", () => {
+  const indexes = SheetRow.schema.indexes();
+  const contentIndex = indexes.find(([fields]) => (
+    fields.sheetId === 1 && fields.hasContent === 1 && fields.rowIndex === -1
+  ));
+
+  assert.ok(contentIndex);
 });

@@ -50,6 +50,15 @@ const buildRowSearchText = (cells = []) => {
     .toLowerCase();
 };
 
+const rowHasStoredData = (cells = []) => normalizeRowCells(cells).some((cell) => {
+  if (String(cell.value ?? "").trim() || String(cell.formula || "").trim()) return true;
+
+  const style = cell.style || {};
+  return Object.entries(style).some(([key, value]) => (
+    value !== undefined && value !== null && value !== "" && value !== defaultCellStyle[key]
+  ));
+});
+
 const normalizeSearchText = (input = "") => {
   if (Array.isArray(input)) return buildRowSearchText(input);
 
@@ -109,4 +118,5 @@ module.exports = {
   buildRowSearchText,
   buildRowSearchTokens,
   buildSearchQueryTokens,
+  rowHasStoredData,
 };

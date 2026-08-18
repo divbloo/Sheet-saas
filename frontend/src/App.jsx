@@ -517,18 +517,6 @@ function App() {
     }
   };
 
-  const loadErpOptions = async (sheetId) => {
-    const res = await authFetch(API_URL + "/sheet/" + sheetId + "/erp-options");
-    const data = await res.json();
-
-    if (res.ok) {
-      setErpOptions({
-        ...defaultErpOptions,
-        ...(data || {}),
-      });
-    }
-  };
-
   const loadPendingCodeRows = async (sheetId) => {
     if (!sheetId) return;
 
@@ -615,10 +603,7 @@ function App() {
     setPendingCodeCursor(null);
     setServerPendingCodeRows([]);
 
-    void Promise.all([
-      loadErpOptions(id),
-      loadPendingCodeRows(id),
-    ]).catch(() => {});
+    void loadPendingCodeRows(id).catch(() => {});
 
     window.requestAnimationFrame(() => {
       if (gridRef.current) gridRef.current.scrollTop = initialScrollTop;
@@ -2710,7 +2695,11 @@ function App() {
 
     const loadInitialData = async () => {
       didLoadInitialWorkspaceSheetsRef.current = true;
-      const [profile] = await Promise.all([loadMe(), loadWorkspaces(), loadSheets()]);
+      const [profile] = await Promise.all([
+        currentUser ? Promise.resolve({ user: currentUser }) : loadMe(),
+        loadWorkspaces(),
+        loadSheets(),
+      ]);
       await refreshAnalyticsIfAdmin(profile?.user);
     };
 

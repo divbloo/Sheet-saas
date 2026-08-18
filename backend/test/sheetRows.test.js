@@ -6,6 +6,7 @@ const {
   buildRowSearchTokens,
   buildSearchQueryTokens,
   normalizeRowCells,
+  rowHasStoredData,
 } = require("../utils/sheetRows");
 
 test("normalizeRowCells pads rows to the configured sheet width", () => {
@@ -39,6 +40,12 @@ test("buildRowSearchText returns empty text for empty rows", () => {
   const text = buildRowSearchText([]);
 
   assert.equal(text, "");
+});
+
+test("rowHasStoredData ignores default empty cells but keeps custom styles", () => {
+  assert.equal(rowHasStoredData([]), false);
+  assert.equal(rowHasStoredData([{ value: "Item" }]), true);
+  assert.equal(rowHasStoredData([{ style: { backgroundColor: "#ff0000" } }]), true);
 });
 
 test("buildRowSearchTokens supports partial indexed search", () => {

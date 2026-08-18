@@ -133,6 +133,11 @@ const SheetSchema = new mongoose.Schema(
         default: 0,
       },
     },
+
+    storageVersion: {
+      type: Number,
+      default: 1,
+    },
   },
   {
     timestamps: true,
@@ -140,6 +145,7 @@ const SheetSchema = new mongoose.Schema(
 );
 
 SheetSchema.index({ "collaborators.userId": 1, updatedAt: -1 });
+SheetSchema.index({ "collaborators.userId": 1, workspaceId: 1, updatedAt: -1 });
 SheetSchema.index({ workspaceId: 1, updatedAt: -1 });
 SheetSchema.index({ createdBy: 1, updatedAt: -1 });
 

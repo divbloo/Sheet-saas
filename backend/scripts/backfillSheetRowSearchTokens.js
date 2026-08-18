@@ -18,13 +18,16 @@ const migrate = async () => {
   let migratedRows = 0;
 
   for await (const row of cursor) {
+    const searchText = buildRowSearchText(row.cells);
+
     operations.push({
       updateOne: {
         filter: { _id: row._id },
         update: {
           $set: {
-            searchText: buildRowSearchText(row.cells),
+            searchText,
             searchTokens: buildRowSearchTokens(row.cells),
+            hasContent: Boolean(searchText),
           },
         },
       },

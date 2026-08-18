@@ -17,6 +17,7 @@
   "scripts": {
     "backfill:search": "node scripts/backfillSheetRowSearchTokens.js",
     "migrate:rows": "node scripts/migrateSheetRows.js",
+    "optimize:rows": "node scripts/optimizeSheetRows.js",
     "test": "node --test",
     "start": "node server.js"
   },

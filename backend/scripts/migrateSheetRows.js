@@ -7,6 +7,7 @@ const {
   buildRowSearchText,
   buildRowSearchTokens,
   normalizeRowCells,
+  rowHasStoredData,
 } = require("../utils/sheetRows");
 
 const migrate = async () => {
@@ -24,20 +25,30 @@ const migrate = async () => {
     const existingRows = await SheetRow.countDocuments({ sheetId: sheet._id });
 
     if (existingRows === 0 && sheet.data.length > 0) {
+      const storedRows = sheet.data
+        .map((row, rowIndex) => ({ row, rowIndex }))
+        .filter(({ row }) => rowHasStoredData(row));
+
       await SheetRow.insertMany(
-        sheet.data.map((row, rowIndex) => ({
-          sheetId: sheet._id,
-          rowIndex,
-          cells: normalizeRowCells(row),
-          searchText: buildRowSearchText(row),
-          searchTokens: buildRowSearchTokens(row),
-        })),
+        storedRows.map(({ row, rowIndex }) => {
+          const searchText = buildRowSearchText(row);
+
+          return {
+            sheetId: sheet._id,
+            rowIndex,
+            cells: normalizeRowCells(row),
+            searchText,
+            searchTokens: buildRowSearchTokens(row),
+            hasContent: Boolean(searchText),
+          };
+        }),
         { ordered: false }
       );
-      migratedRows += sheet.data.length;
+      migratedRows += storedRows.length;
     }
 
     sheet.data = [];
+    sheet.storageVersion = 2;
     sheet.markModified("data");
     await sheet.save();
     migratedSheets += 1;
