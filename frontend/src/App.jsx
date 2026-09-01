@@ -40,6 +40,11 @@ import {
   recalculateData,
 } from "./utils/spreadsheetData";
 import {
+  EXCEL_IMPORT_OPTIONS,
+  getCellClipboardText,
+  getSheetTableWidth,
+} from "./utils/gridLayout";
+import {
   formatCairoDateTimeInput,
   getCairoDateDaysAgo,
   getDefaultTaxExportPeriod,
@@ -1958,7 +1963,7 @@ function App() {
   const copySelection = async () => {
     if (!selectedCell || !selectedSheet) return;
     const cell = getSheetCell(selectedCell.rowIndex, selectedCell.colIndex);
-    const text = cell.formula || cell.value || "";
+    const text = getCellClipboardText(cell);
 
     try {
       await navigator.clipboard.writeText(text);
@@ -2232,7 +2237,7 @@ function App() {
     const XLSX = await loadExcelTools();
     const wb = XLSX.read(buffer);
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    const rows = XLSX.utils.sheet_to_json(ws, EXCEL_IMPORT_OPTIONS);
     const maxCols = rows.reduce((max, row) => Math.max(max, row.length), 0);
 
     if (maxCols > COLS) {
@@ -3631,7 +3636,14 @@ function App() {
           </div>
 
           <div className="grid-wrap-full" ref={gridRef} onScroll={handleGridScroll}>
-            <table className="sheet-table-full">
+            <table
+              className="sheet-table-full"
+              style={{
+                width: getSheetTableWidth(
+                  Array.from({ length: COLS }, (_, colIndex) => getColumnWidth(colIndex))
+                ),
+              }}
+            >
               <colgroup>
                 <col className="corner-col" />
                 {Array.from({ length: COLS }, (_, colIndex) => (
@@ -3773,6 +3785,9 @@ function App() {
                           ) : (
                             <div className={isDescriptionCell ? "description-builder-cell" : ""}>
                               <textarea
+                                className={isCodeColumn ? "code-cell-editor" : undefined}
+                                wrap={isCodeColumn ? "off" : undefined}
+                                title={isCodeColumn ? String(normalizedCell.value ?? "") : undefined}
                                 value={normalizedCell.value}
                                 readOnly={!cellCanEdit || (colIndex === 1 && rowIndex > 0)}
                                 style={{

@@ -1225,6 +1225,15 @@ select:focus {
   vertical-align: top;
 }
 
+.sheet-table-full td textarea.code-cell-editor {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  overflow-wrap: normal;
+  direction: ltr;
+  text-overflow: clip;
+}
+
 .sheet-table-full td select {
   cursor: pointer;
 }
