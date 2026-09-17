@@ -40,10 +40,18 @@ import {
   recalculateData,
 } from "./utils/spreadsheetData";
 import {
-  EXCEL_IMPORT_OPTIONS,
   getCellClipboardText,
   getSheetTableWidth,
 } from "./utils/gridLayout";
+import {
+  assertSupportedExcelFile,
+  assertSupportedSpreadsheetFile,
+  createWorkbook,
+  downloadWorkbook,
+  getWorksheetRows,
+  loadWorkbook,
+  parseCsv,
+} from "./utils/excelFiles";
 import {
   formatCairoDateTimeInput,
   getCairoDateDaysAgo,
@@ -2073,8 +2081,6 @@ function App() {
     showMessage("Version restored");
   };
 
-  const loadExcelTools = async () => import("xlsx");
-
   const loadPdfTools = async () => {
     const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
       import("jspdf"),
@@ -2108,7 +2114,6 @@ function App() {
     const range = getExportRangeBounds();
     if (!range) return;
 
-    const XLSX = await loadExcelTools();
     const exportRows = await loadRowsForExportRange(range);
     if (!exportRows.length) return;
 
@@ -2118,29 +2123,26 @@ function App() {
         return normalized.formula || normalized.value || "";
       })
     );
-    const worksheet = XLSX.utils.aoa_to_sheet(rows);
+    const { workbook, worksheet } = await createWorkbook("Sheet1", rows);
 
     exportRows.forEach((row, rowIndex) => {
       row.slice(0, COLS).forEach((cell, colIndex) => {
         const normalized = normalizeCell(cell);
         if (!normalized.formula) return;
 
-        const address = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
-        worksheet[address] = {
-          ...(worksheet[address] || {}),
-          f: normalized.formula.replace(/^=/, ""),
-          v: normalized.value || undefined,
+        worksheet.getCell(rowIndex + 1, colIndex + 1).value = {
+          formula: normalized.formula.replace(/^=/, ""),
+          result: normalized.value || undefined,
         };
       });
     });
 
-    worksheet["!cols"] = Array.from({ length: COLS }, (_, colIndex) => ({
-      wch: Math.max(8, Math.round(getColumnWidth(colIndex) / 7)),
-    }));
+    Array.from({ length: COLS }, (_, colIndex) => {
+      worksheet.getColumn(colIndex + 1).width = Math.max(8, Math.round(getColumnWidth(colIndex) / 7));
+      return null;
+    });
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
-    XLSX.writeFile(workbook, `${selectedSheet.name || "sheet"}-${range.label}.xlsx`);
+    await downloadWorkbook(workbook, `${selectedSheet.name || "sheet"}-${range.label}.xlsx`);
   };
 
   const exportPDF = async () => {
@@ -2181,7 +2183,6 @@ function App() {
       return;
     }
 
-    const XLSX = await loadExcelTools();
     const activeFrom = getCairoDateDaysAgo(TAX_ACTIVE_FROM_DAYS_AGO);
     const taxRows = (data.rows || []).map(({ cells }) => {
       const itemCode = getCellExportText(cells, TAX_ITEM_CODE_COLUMN_INDEX);
@@ -2195,49 +2196,52 @@ function App() {
       return;
     }
 
-    const worksheet = XLSX.utils.aoa_to_sheet([TAX_EXPORT_HEADERS, ...taxRows], { cellDates: true });
-    worksheet["!cols"] = TAX_EXPORT_COLUMN_WIDTHS.map((width) => ({ width }));
-    worksheet["!ref"] = XLSX.utils.encode_range({
-      s: { r: 0, c: 0 },
-      e: { r: taxRows.length, c: TAX_EXPORT_HEADERS.length - 1 },
+    const { workbook, worksheet } = await createWorkbook(
+      "DataEntry",
+      [TAX_EXPORT_HEADERS, ...taxRows]
+    );
+    TAX_EXPORT_COLUMN_WIDTHS.forEach((width, columnIndex) => {
+      worksheet.getColumn(columnIndex + 1).width = width;
     });
 
     taxRows.forEach((_, rowIndex) => {
       const sheetRowIndex = rowIndex + 1;
-      const itemCodeAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 1 });
-      const activeFromAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 6 });
-      const activeToAddress = XLSX.utils.encode_cell({ r: sheetRowIndex, c: 7 });
-
-      worksheet[itemCodeAddress] = {
-        ...(worksheet[itemCodeAddress] || {}),
-        t: "s",
-        z: "@",
-      };
-      worksheet[activeFromAddress] = {
-        t: "d",
-        v: activeFrom,
-        z: "m/d/yy",
-      };
-      worksheet[activeToAddress] = {
-        t: "z",
-        z: "m/d/yy",
-      };
+      const excelRowNumber = sheetRowIndex + 1;
+      worksheet.getCell(excelRowNumber, 2).numFmt = "@";
+      worksheet.getCell(excelRowNumber, 7).value = activeFrom;
+      worksheet.getCell(excelRowNumber, 7).numFmt = "m/d/yy";
+      worksheet.getCell(excelRowNumber, 8).value = null;
+      worksheet.getCell(excelRowNumber, 8).numFmt = "m/d/yy";
     });
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "DataEntry");
-    XLSX.writeFile(workbook, TAX_EXPORT_FILE_NAME, { cellDates: true });
+    await downloadWorkbook(workbook, TAX_EXPORT_FILE_NAME);
   };
 
   const uploadExcel = async (event) => {
     const file = event.target.files?.[0];
     if (!file || !canBypassRowLocks || !selectedSheet) return;
 
-    const buffer = await file.arrayBuffer();
-    const XLSX = await loadExcelTools();
-    const wb = XLSX.read(buffer);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, EXCEL_IMPORT_OPTIONS);
+    try {
+      assertSupportedSpreadsheetFile(file);
+    } catch (error) {
+      showMessage(error.message);
+      event.target.value = "";
+      return;
+    }
+
+    let rows;
+    try {
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        rows = parseCsv(await file.text());
+      } else {
+        const workbook = await loadWorkbook(await file.arrayBuffer());
+        rows = getWorksheetRows(workbook.worksheets[0]);
+      }
+    } catch {
+      showMessage("Failed to read spreadsheet file");
+      event.target.value = "";
+      return;
+    }
     const maxCols = rows.reduce((max, row) => Math.max(max, row.length), 0);
 
     if (maxCols > COLS) {
@@ -2295,16 +2299,12 @@ function App() {
     setSavingStatus("Updating coding...");
 
     try {
+      assertSupportedExcelFile(file);
       const buffer = await file.arrayBuffer();
-      const XLSX = await loadExcelTools();
-      const workbook = XLSX.read(buffer);
-      const sheets = workbook.SheetNames.map((name) => ({
-        name,
-        rows: XLSX.utils.sheet_to_json(workbook.Sheets[name], {
-          header: 1,
-          defval: "",
-          raw: false,
-        }),
+      const workbook = await loadWorkbook(buffer);
+      const sheets = workbook.worksheets.map((worksheet) => ({
+        name: worksheet.name,
+        rows: getWorksheetRows(worksheet),
       }));
 
       const res = await authFetch(API_URL + "/item-coding-options", {
@@ -2329,8 +2329,8 @@ function App() {
           ? `Item coding options updated (${updatedRows} rows)`
           : "Item coding options updated"
       );
-    } catch {
-      showMessage("Failed to read item coding file");
+    } catch (error) {
+      showMessage(error.message || "Failed to read item coding file");
     } finally {
       setSavingStatus("");
       event.target.value = "";
@@ -3376,11 +3376,11 @@ function App() {
           {selectedSheet && (
             <div className="drawer-section">
               <h4>File & History</h4>
-              <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={uploadExcel} hidden />
+              <input ref={fileInputRef} type="file" accept=".xlsx,.csv" onChange={uploadExcel} hidden />
               <input
                 ref={codingFileInputRef}
                 type="file"
-                accept=".xlsx,.xls"
+                accept=".xlsx"
                 onChange={uploadItemCodingExcel}
                 hidden
               />

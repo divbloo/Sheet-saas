@@ -2,14 +2,24 @@
   "name": "sheet-saas",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=22.12.0",
+    "npm": ">=10"
+  },
   "scripts": {
+    "start": "npm --prefix backend start",
     "backend": "npm --prefix backend start",
     "frontend": "npm --prefix frontend run dev",
     "dev": "node scripts/dev.js",
     "lint": "npm --prefix frontend run lint",
     "build": "npm --prefix frontend run build",
+    "check:imports": "node scripts/checkImportCase.js",
     "migrate:rows": "npm --prefix backend run migrate:rows",
     "migrate:versions": "npm --prefix backend run migrate:versions",
-    "test": "npm --prefix backend test"
+    "test:backend": "npm --prefix backend test",
+    "test:frontend": "npm --prefix frontend test",
+    "test:tooling": "node --test scripts/*.test.js",
+    "test": "npm run test:backend && npm run test:frontend && npm run test:tooling",
+    "verify": "npm run check:imports && npm test && npm run lint && npm run build"
   }
 }

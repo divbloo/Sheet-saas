@@ -24,7 +24,8 @@ In production, the backend can serve the built frontend from `frontend/dist`.
 
 ## Requirements
 
-- Node.js 20 or newer
+- Node.js 22.12 or newer
+- npm 10 or newer
 - MongoDB database
 
 ## Environment
@@ -82,6 +83,9 @@ npm run frontend
 npm test
 npm run lint
 npm run build
+
+# Full release gate, including Linux filename-case validation
+npm run verify
 ```
 
 On Windows PowerShell, if `npm` is blocked by execution policy, use `npm.cmd`:
@@ -108,6 +112,9 @@ NODE_ENV=production npm --prefix backend start
 
 The backend serves `frontend/dist` automatically when `NODE_ENV=production`.
 
+The service exposes `GET /healthz`. It returns `200 {"status":"ok"}` only after
+MongoDB is connected, and `503` while the application is not ready.
+
 ## Data Migration
 
 If older sheets still store row data inside the sheet document, run:
@@ -123,3 +130,9 @@ npm run migrate:rows
 - Set `FRONTEND_URL` to the deployed public origin.
 - Make sure the server allows WebSocket traffic for Socket.IO.
 - Do not commit `.env`, `node_modules`, `dist`, build output, or temporary Excel files.
+- Use the checked-in `ecosystem.config.cjs` with PM2. It waits for the app to be
+  ready and gives active requests up to 20 seconds to finish during reloads.
+- Keep PM2 in single-instance mode unless a shared Socket.IO adapter is added.
+
+See [Linux production deployment](docs/linux-deployment.md) for the complete
+Ubuntu, Nginx, PM2, backup, restore, health-check, and rollback runbook.

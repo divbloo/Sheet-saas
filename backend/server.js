@@ -28,7 +28,6 @@ const {
   createCorsOptions,
   createHelmetOptions,
   getFrontendUrls,
-  verifyProductionSecurity,
 } = require("./config/security");
 const {
   ALLOWED_SHEET_TYPES,
@@ -73,6 +72,11 @@ const {
 const { createERPTemplateData } = require("./utils/erpTemplates");
 const { auth } = require("./utils/userHelpers");
 const {
+  createGracefulShutdown,
+  getReadiness,
+  validateRuntimeEnvironment,
+} = require("./utils/runtime");
+const {
   canAssignSheetRole,
   canBypassRowLocks,
   canEdit,
@@ -90,7 +94,15 @@ const server = http.createServer(app);
 const gzipAsync = promisify(zlib.gzip);
 const gunzipAsync = promisify(zlib.gunzip);
 
-const PORT = process.env.PORT || 5000;
+let runtime;
+try {
+  runtime = validateRuntimeEnvironment();
+} catch (error) {
+  console.error(`Invalid runtime configuration: ${error.message}`);
+  process.exit(1);
+}
+
+const PORT = runtime.port;
 const FRONTEND_URLS = getFrontendUrls();
 const corsOptions = createCorsOptions(FRONTEND_URLS);
 
@@ -108,9 +120,18 @@ const io = new Server(server, {
 });
 
 app.use(helmet(createHelmetOptions()));
+app.set("trust proxy", runtime.trustProxy);
 app.use(cors(corsOptions));
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: "15mb" }));
+
+app.get("/healthz", (req, res) => {
+  const readiness = getReadiness(mongoose.connection.readyState);
+  res
+    .status(readiness.isReady ? 200 : 503)
+    .set("Cache-Control", "no-store")
+    .json({ status: readiness.status });
+});
 
 app.use(
   rateLimit({
@@ -168,21 +189,9 @@ app.param("userId", (req, res, next, userId) => {
   next();
 });
 
-if (!process.env.MONGO_URI) {
-  console.error("Missing MONGO_URI in .env file");
-  process.exit(1);
-}
-
-if (!process.env.JWT_SECRET) {
-  console.error("Missing JWT_SECRET in .env file");
-  process.exit(1);
-}
-
-verifyProductionSecurity();
-
 const connectToDatabase = async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
+    await mongoose.connect(runtime.mongoUri, {
       serverSelectionTimeoutMS: 15000,
     });
     console.log("DB Connected");
@@ -2298,8 +2307,36 @@ if (process.env.NODE_ENV === "production") {
   }
 }
 
+const closeRealtime = () => new Promise((resolve) => io.close(resolve));
+const closeHttp = () => new Promise((resolve, reject) => {
+  server.close((error) => (
+    error && error.code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve()
+  ));
+});
+const shutdown = createGracefulShutdown({
+  closeRealtime,
+  closeHttp,
+  closeDatabase: () => mongoose.disconnect(),
+});
+
+const handleShutdownSignal = (signal) => {
+  const forceExitTimer = setTimeout(() => {
+    console.error("Graceful shutdown timed out");
+    process.exit(1);
+  }, 15000);
+  forceExitTimer.unref();
+
+  shutdown(signal)
+    .then(() => process.exit(0))
+    .catch(() => process.exit(1));
+};
+
+process.once("SIGTERM", () => handleShutdownSignal("SIGTERM"));
+process.once("SIGINT", () => handleShutdownSignal("SIGINT"));
+
 connectToDatabase().then(() => {
   server.listen(PORT, () => {
     console.log("SaaS API running on port " + PORT);
+    if (typeof process.send === "function") process.send("ready");
   });
 });
